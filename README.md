@@ -12,6 +12,7 @@ describes the machine and, through `compose.yaml`, assembles it.
 | --- | --- | --- |
 | media | gluetun (VPN), qBittorrent, Prowlarr, Plex, torrent-finder | `media.bjorngreen.se`, LAN ports |
 | matte-vm | FastAPI + SQLite + PWA | its own Cloudflare hostname |
+| jellyseerr | request front-end for Plex | its own Cloudflare hostname |
 | (others) | added per the template in §10 | one hostname each |
 | shared | cloudflared — **one** tunnel for the whole box | — |
 
@@ -196,6 +197,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
   compose.yaml                    include: list + cloudflared
   media/compose.yaml              gluetun, qbittorrent, prowlarr, plex, finder
   apps/matte-vm.yaml              one fragment per standalone app
+  apps/jellyseerr.yaml            third-party image, same shape
   hw/x86.yaml, hw/pi.yaml         per-hardware overlays, picked in .env
   bin/autodeploy                  poll git, redeploy what changed
   autodeploy.conf                 repo -> service map
@@ -290,6 +292,7 @@ allocated" surprise when adding an app.
 | 8000 | matte-vm `app` | taken — do not reuse |
 | 8010 | torrent-finder | container side is 8000 |
 | 8090 | frontend (nginx) | container side is 80 |
+| 5055 | Jellyseerr | its own default |
 | 32400 | Plex | `network_mode: host` |
 
 Container ports never collide, only host ports. An app reachable solely through
@@ -558,6 +561,46 @@ The dashboard marks an offloaded stream `(hw)`. `permission denied` on
 container while present on the host, `COMPOSE_FILE` is not selecting
 `hw/x86.yaml`, or something passed `-f` (§3).
 
+### Jellyseerr (`http://<host>:5055`, `requests.bjorngreen.se`)
+
+Create the config directory first, or the container starts and cannot write:
+
+```bash
+sudo mkdir -p /srv/appdata/jellyseerr && sudo chown -R 1000:1000 /srv/appdata/jellyseerr
+cd ~/stack && docker compose up -d jellyseerr
+docker compose logs -f jellyseerr        # a permissions complaint here means the chown
+```
+
+Then in the setup wizard: choose **Plex**, and for the server address use
+`host.docker.internal` port `32400` — not `plex`, which does not resolve (§10).
+Sign in with your Plex account, import the Movies and TV libraries, and set
+*Settings → General → Application URL* to `https://requests.bjorngreen.se`.
+
+**What it cannot do here.** Jellyseerr fulfils an approved request by handing it
+to Sonarr or Radarr, and this box runs neither. *Settings → Services* will be
+empty and approved requests stay pending forever, because nothing downstream is
+listening. What still works, and is most of the value:
+
+- a browsable TMDB catalogue with per-user accounts via Plex sign-in
+- requests, approvals and notifications, so asks arrive somewhere instead of in
+  a chat message you lose
+- **automatic availability** — Jellyseerr watches the Plex libraries it imported
+  and flips a request to *Available* once the file has been scanned in
+
+So the loop closes on its own; only the middle step is manual. A request comes
+in, you search it in torrent-finder, and Jellyseerr notices when Plex does.
+
+Making it fully automatic is a real decision, not a config change, and there are
+two routes:
+
+| Route | What it costs |
+| --- | --- |
+| Add Sonarr + Radarr | The standard chain: Jellyseerr → Sonarr/Radarr → Prowlarr → qBittorrent. Two more containers, and they insist on owning save paths, renaming and qBittorrent categories — which overlaps torrent-finder almost exactly and would fight `MANAGE_CATEGORIES` over the same categories (§8). Pick one to own routing. |
+| Teach torrent-finder to accept a webhook | Jellyseerr can POST an approved request; the finder already searches Prowlarr and pushes to qBittorrent, so it is the search-and-pick step that would need automating. Keeps one downloader, but it is development rather than deployment. |
+
+Neither is required to start using it as an inbox, and neither is foreclosed by
+doing so.
+
 ## 9. Cloudflare
 
 One tunnel, one cloudflared, hostnames added in the dashboard — the token-based
@@ -569,6 +612,7 @@ tunnel is **remotely managed**, so a local `config.yml` is ignored.
 | --- | --- | --- | --- | --- |
 | `media` | `bjorngreen.se` | *(empty)* | HTTP | `torrent-finder:8000` |
 | (matte) | `bjorngreen.se` | *(empty)* | HTTP | `app:8000` |
+| `requests` | `bjorngreen.se` | *(empty)* | HTTP | `jellyseerr:5055` |
 
 The URL is `<service name>:<container port>` — the container port, not the host
 port, because cloudflared talks over the shared docker network. Leave **Path**
@@ -583,6 +627,15 @@ needs no extra setup). The finder can download to your disk and delete from your
 Plex library, so it gets Access *and* its own Basic auth. Two prompts in the
 browser is both locks working, not a bug.
 
+**Jellyseerr is the one case where Access may be wrong.** It signs people in with
+Plex OAuth, so it already has real per-user auth, and it exists for other people
+to use. An Access policy in front means adding every requester's email address to
+Cloudflare as well, and they hit two unrelated login screens. If it is only ever
+you, keep Access. If anyone else requests, drop Access for that hostname and let
+Jellyseerr's own Plex sign-in be the lock — it can accept nothing more dangerous
+than a request. Set *Settings → General → Application URL* to the public
+hostname either way, or Plex's OAuth redirect and the notification links break.
+
 ```bash
 curl -sI https://media.bjorngreen.se | head -1
 # 401 = the app answered and refused for lack of credentials (healthy)
@@ -591,6 +644,8 @@ curl -sI https://media.bjorngreen.se | head -1
 ```
 
 ## 10. Adding a new app
+
+### One you build from a repo
 
 The app repo needs nothing but a `Dockerfile`; the stack owns how it is wired in.
 
@@ -637,6 +692,50 @@ cd ~/stack
 docker compose config -q                        # catches the mistake early
 docker compose up -d --build <new-app>
 ```
+
+### One that ships as an image
+
+Third-party apps — Jellyseerr, a reverse proxy, an ebook server — differ in three
+ways: `image:` instead of `build:`, **no** `autodeploy.conf` line (there is no
+repo to poll, so they update only when you `docker compose pull`), and a tag
+worth pinning, because anything with a database migrates it forward on start and
+a migration does not roll back when you downgrade.
+
+```yaml
+# ~/stack/apps/<new-app>.yaml
+services:
+  <new-app>:
+    image: vendor/<new-app>:1.2.3     # pin; `latest` is a silent major upgrade
+    container_name: <new-app>
+    environment:
+      TZ: "${TZ:-Europe/Stockholm}"
+    volumes:
+      - /srv/appdata/<new-app>:/config
+    ports:
+      - "50xx:50xx"
+    restart: unless-stopped
+```
+
+**If it needs to talk to Plex, it cannot use the service name.** Plex runs with
+`network_mode: host`, so it is not on this project's network and
+`http://plex:32400` does not resolve — the same shape of trap as §5, from the
+other direction. Map the host gateway in and use that:
+
+```yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # then point the app at http://host.docker.internal:32400
+```
+
+Everything else in the stack is a normal bridge service, so `http://<service
+name>:<container port>` works as expected between them.
+
+### "Plex addons" are not a thing any more
+
+Plex removed its plugin framework in 2018, so nothing gets added *inside* the
+Plex container. Everything in that ecosystem now — Jellyseerr, Overseerr,
+Tautulli, Kometa — is a separate app talking to Plex over its HTTP API, which is
+why they all arrive as containers and go through this section.
 
 ## 11. Autodeployment
 

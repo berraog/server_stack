@@ -1,0 +1,43 @@
+# Jellyseerr — request front-end for Plex. A separate application, not a Plex
+# plugin: Plex removed plugin support in 2018, so anything that "adds features
+# to Plex" today is its own container talking to Plex's API.
+#
+# Chosen over Overseerr, which it is a fork of: Overseerr has been effectively
+# unmaintained since 2023, and Jellyseerr keeps full Plex support alongside the
+# Jellyfin/Emby support it added.
+#
+# IMPORTANT — this cannot fulfil a request on its own. Jellyseerr hands accepted
+# requests to Sonarr/Radarr, which this box does not run; see README §10.
+# Without them it is a request inbox: people ask, you grab it in torrent-finder,
+# and Jellyseerr flips the request to Available by itself once Plex has scanned
+# the file. That is genuinely useful, but it is not automatic downloading.
+services:
+  jellyseerr:
+    # Pin this once a version is known good — Jellyseerr migrates its database
+    # forward on start, and a migration does not roll back if you downgrade:
+    #   docker compose exec jellyseerr cat /app/package.json | grep '"version"'
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    # Plex runs with network_mode: host, so it is NOT on this network and
+    # http://plex:32400 does not resolve — the same shape of trap as §5. This
+    # maps the host's gateway address into the container, so Plex is reachable
+    # at http://host.docker.internal:32400 (see README §10).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TZ: "${TZ:-Europe/Stockholm}"
+      LOG_LEVEL: info
+    volumes:
+      # Its SQLite database and settings. chown to 1000:1000 before first start.
+      - /srv/appdata/jellyseerr:/app/config
+    ports:
+      - "5055:5055"    # LAN only; the tunnel uses the container port directly
+    healthcheck:
+      # busybox wget, from the image's alpine base. Drop this block if the
+      # container reports unhealthy while the UI works.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5055/api/v1/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
