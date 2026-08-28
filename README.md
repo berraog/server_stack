@@ -41,11 +41,18 @@ describes the machine and, through `compose.yaml`, assembles it.
 
 Three disks, three jobs:
 
+| Mount | Disk | Job |
+| --- | --- | --- |
+| `/srv/appdata` | internal 500 GB SSD | all container state; mostly empty on purpose |
+| `/mnt/active` | **1 TB USB** (the old `/mnt/ssd2`) | everything in flight and everything currently seeding |
+| `/mnt/archive` | **500 GB USB** (the old `/mnt/ssd`) | content aged off active; read-only to every container |
+
 ```
 /srv/appdata/          internal 500 GB SSD — all container state
-  gluetun/  qbittorrent/  prowlarr/  plex/{config,transcode}/  matte-vm/
+  gluetun/  qbittorrent/  prowlarr/  radarr/  sonarr/  bazarr/
+  jellyseerr/  kometa/  plex/{config,transcode}/  matte-vm/
 
-/mnt/active/           USB SSD — everything torrents touch
+/mnt/active/           1 TB USB — everything torrents touch
   incomplete/          qBittorrent's default save path AND its incomplete path
   downloads/movies/    qBittorrent's targets; torrents keep seeding from here
   downloads/tv/
@@ -54,7 +61,7 @@ Three disks, three jobs:
   books/               manual grabs — ebooks, audiobooks, magazines
   other/               manual grabs — anything else
 
-/mnt/archive/          USB SSD — content moved off active once it fills
+/mnt/archive/          500 GB USB — content moved off active once it fills
   movies/  tv/  ...    read-only; mirrors whichever active folders you move
 ```
 
@@ -90,18 +97,52 @@ rest of the state onto the fast internal SSD: put `incomplete/` there and every
 completion becomes a cross-disk copy, while `MIN_FREE_SPACE_GB` starts guarding
 500 GB of system disk as the media drive silently fills.
 
-**Active and archive are roles, not brands.** Assign `active` to whichever drive
-has more free space. When it fills, move a finished folder across by hand:
+**The bigger drive is `active`, and that is not arbitrary.** It follows from the
+hardlinks. A 20 GB film seeding in `downloads/movies/` and named properly in
+`library/movies/` is *one* set of bytes with two names, so it costs 20 GB, not
+40 — which means active's real occupancy is the unique size of everything you
+currently seed, and it holds far more than the directory listing suggests.
+
+Moving something to archive is the single operation that breaks that. Archive is
+a different filesystem, so the move is a real copy, the hardlink is severed, and
+qBittorrent loses the file:
 
 ```bash
-mv /mnt/active/movies/"Some Film (2019)" /mnt/archive/movies/
+mv /mnt/active/library/movies/"Some Film (2019)" /mnt/archive/movies/
 ```
 
-Plex finds it again because both directories are in the same library. qBittorrent
-does not, so that torrent stops seeding — which is the intended trade and the
-reason it is a deliberate manual step rather than a script. Two disks is also the
-point at which a union filesystem (mergerfs) starts paying for itself; it is not
-worth the mount-order failure modes yet.
+Plex finds it again, because both directories are in the same library (§8).
+qBittorrent does not, so that torrent stops seeding — the intended trade, and the
+reason this is a deliberate manual step rather than a script. **Free space on
+active is therefore exactly "how long until I have to shuffle files by hand", so
+it goes to the larger disk.** Archive being smaller costs nothing: it holds cold
+files that are already downloaded and no longer seeding.
+
+If you do not mind losing seeds, none of this is delicate — moving a folder to
+archive is just a copy, and content can be shuffled between the two whenever it
+suits. Radarr and Sonarr only manage the `library/` root on active, so anything
+in archive is simply files that Plex reads and nothing else tracks.
+
+Roughly 880 GiB usable on active after ext4's overhead, 440 GiB on archive, so
+about 1.3 TB of unique video in total — and whatever sits on active is
+simultaneously seeding at no extra cost. If you want the last few GB, ext4
+reserves 5% for root by default, which is pointless on a media drive:
+
+```bash
+sudo tune2fs -m 1 /dev/sdXn      # ~45 GB back on the 1 TB, ~22 GB on the 500 GB
+```
+
+**The internal 500 GB is meant to stay mostly empty.** Ubuntu, Docker's images
+and `/srv/appdata` together come to well under 100 GB, and the spare is
+deliberate headroom: Plex's metadata and thumbnails grow with the library, and
+`plex/transcode` is scratch that spikes. Resist the temptation to put media on
+it — `incomplete/` there would make every completion a cross-disk copy, and a
+library folder there could not be hardlinked from `downloads/`. Backup tarballs
+(§12) staged before they leave the box are the one other reasonable use.
+
+Two disks is also the point at which a union filesystem (mergerfs) starts paying
+for itself, presenting both as one tree so nothing ever has to be moved by hand.
+It is not worth its mount-order failure modes at this size.
 
 ### The installer's LVM default will hide 400 GB
 
@@ -1260,20 +1301,50 @@ Do not start the stack yet — §15c is the other half of the same sitting.
 
 ### 15c. Handing the existing library to Radarr and Sonarr
 
-Two things need saying: qBittorrent's container paths changed, and Radarr and
-Sonarr have never seen any of this content.
+Radarr and Sonarr have never seen any of this content, and qBittorrent's
+container paths have changed under it. How much work that is depends entirely on
+one question: **do you care whether the already-downloaded films keep seeding?**
 
-**qBittorrent first.** Running torrents will report missing files until they are
-told where the data went (`/auto_movies` → `/data/downloads/movies`). There is no
-bulk rewrite, but per-category is close enough:
+#### If you do not — the simple path
+
+Put the existing content straight into `library/`, adopt it there, and let the old
+torrents go. This is a directory rename, so it is instant regardless of size.
+Amend step 2 of §15b to move the folders one level differently:
+
+```bash
+mv /mnt/active/share/torrents/movies  /mnt/active/library/movies
+mv /mnt/active/share/torrents/tv      /mnt/active/library/tv
+mkdir -p /mnt/active/downloads/{movies,tv}      # start empty; only new grabs land here
+```
+
+Then, with Radarr and Sonarr configured (§8):
+
+1. In qBittorrent, select the old torrents → **Remove** → *without* deleting
+   files. They would otherwise sit there reporting missing data forever.
+2. *Movies → Library Import* in Radarr, pointed at `/data/library/movies`, and
+   *Series → Library Import* in Sonarr at `/data/library/tv`. Importing from
+   inside its own root folder means Radarr adopts and renames the files **in
+   place** — no copy, no hardlink, no second set of bytes.
+3. Correct whatever it mismatched. That is the entire cost.
+
+`downloads/` then only ever contains things downloaded from here on, which are
+the ones that hardlink into `library/` and do keep seeding.
+
+#### If you do — the seeding-preserving path
+
+Keep §15b as written, so the finished folders become `downloads/`, and repoint
+qBittorrent at them before importing.
+
+Running torrents report missing files until they are told where the data went
+(`/auto_movies` → `/data/downloads/movies`). There is no bulk rewrite, but
+per-category is close enough:
 
 1. Start the stack, open the WebUI, click a category in the sidebar.
 2. Select all (Ctrl-A) → right-click → **Set location** → the new path.
 3. It rechecks — fast, since the files are present and unmoved.
 
-If you would rather not touch the session, add compatibility mounts to
-`media/compose.yaml` so both spellings resolve, migrate at leisure, then delete
-them:
+Or add compatibility mounts to `media/compose.yaml` so both spellings resolve,
+migrate at leisure, then delete them:
 
 ```yaml
       - /mnt/active/downloads/movies:/auto_movies
@@ -1281,20 +1352,15 @@ them:
       - /mnt/active/incomplete:/auto_incomplete
 ```
 
-**Then adopt the library.** With Radarr and Sonarr configured (§8), use
-*Movies → Library Import* (Radarr) and *Series → Library Import* (Sonarr) pointed
-at `/data/downloads/movies` and `/data/downloads/tv`. They match each folder to a
-title, then import into `/data/library/...` by **hardlink** — so nothing is
-copied, the disk does not grow, and the torrents carry on seeding from
-`downloads/` untouched. Expect to correct a few mismatched titles by hand; that
-is the whole cost.
+Then *Library Import* pointed at `/data/downloads/movies` and
+`/data/downloads/tv`. Importing from outside the root folder makes Radarr
+**hardlink** into `library/`, so nothing is copied, the disk does not grow, and
+the torrents carry on seeding from `downloads/` untouched.
 
-Point Plex's libraries at `library/` afterwards, not `downloads/`, and remove the
-old folders from the library so the same film does not appear twice.
+#### Either way
 
-The alternative is legitimate: let the Pi seed the old layout until it drains and
-start clean. Finished files are already in `/mnt/archive`, so only in-flight
-torrents are lost.
+Point Plex's libraries at `library/` and `/archive/...`, never at `downloads/`,
+and remove the old folder paths from the library so nothing appears twice.
 
 ### 15d. Moving to the mini PC
 
