@@ -1,9 +1,13 @@
 # homelab runbook
 
 Everything needed to rebuild this server from a blank disk, plus how to change
-or extend it afterwards. The hardware is a BOSGAME mini PC (Intel N95) running
-Ubuntu Server 24.04. The Raspberry Pi it replaces is still a supported target
-on the `pi` branch; §15 covers restructuring the disks and moving between them.
+or extend it afterwards.
+
+> **This is the `pi` branch** — the Raspberry Pi variant, kept so the setup can
+> be run and tested on the Pi before the mini PC replaces it. It differs from
+> `main` in this file and in the default `COMPOSE_FILE` in `.env.example`;
+> every compose file is identical, and the Pi simply takes no hardware overlay.
+> §15 covers moving to the mini PC and deleting this branch.
 
 **What runs here**
 
@@ -35,11 +39,11 @@ on the `pi` branch; §15 covers restructuring the disks and moving between them.
 
 ## 1. Hardware, OS and disks
 
-- BOSGAME mini PC, Intel N95 (Alder Lake-N, x86_64), Ubuntu Server 24.04 LTS.
-  The Raspberry Pi is still a supported target — see the `pi` branch and §15.
+- Raspberry Pi (arm64), Raspberry Pi OS 64-bit, Bookworm or newer.
 - Wired ethernet. A static DHCP lease makes LAN URLs stable.
 
-Three disks, three jobs:
+There is no internal SSD here, so the three jobs share two USB drives — and the
+SD card gets none of them:
 
 | Mount | Disk | Job |
 | --- | --- | --- |
@@ -48,15 +52,6 @@ Three disks, three jobs:
 | `/mnt/archive` | **500 GB USB** (the old `/mnt/ssd`) | content aged off active; read-only to every container |
 
 ```
-/srv/appdata/          internal 500 GB SSD — all container state, grouped to
-  media/               mirror the compose fragments: one directory per fragment
-    gluetun/  qbittorrent/  prowlarr/  radarr/  sonarr/  bazarr/
-    plex/{config,transcode}/
-  home/
-    homeassistant/  mosquitto/  zigbee2mqtt/
-  apps/
-    jellyseerr/  kometa/  matte-vm/
-
 /mnt/active/           1 TB USB — everything torrents touch
   incomplete/          qBittorrent's default save path AND its incomplete path
   downloads/movies/    qBittorrent's targets; torrents keep seeding from here
@@ -66,8 +61,11 @@ Three disks, three jobs:
   books/               manual grabs — ebooks, audiobooks, magazines
   other/               manual grabs — anything else
 
-/mnt/archive/          500 GB USB — content moved off active once it fills
+/mnt/archive/          500 GB USB — older content, plus all container state
   movies/  tv/  ...    read-only; mirrors whichever active folders you move
+  appdata/             bind-mounted to /srv/appdata (see below)
+
+/  (SD card)           OS and the git checkouts. Nothing else, ever.
 ```
 
 **Why `downloads/` and `library/` both exist — nothing is duplicated.** On Linux a
@@ -130,10 +128,19 @@ qBittorrent categories. Inside `books/`, keep `audiobooks/`, `ebooks/` and
 `magazines/` as subfolders if you want them apart. Nothing on this box reads
 them; that would be Calibre-web or Audiobookshelf, added per §10.
 
-**Why state is internal and media is not.** Plex's library is a SQLite database
-bound by random writes, so its location is the one you can actually feel; media
-is sequential, re-downloadable, and far too big for 500 GB. All three disks are
-SSDs, so the mountpoints name each disk's *job* rather than its bus.
+**Why nothing lives on the card.** SD cards die from sustained small writes, and
+the Plex library is a SQLite database doing exactly that. On the mini PC this
+state sits on an internal SSD at `/srv/appdata`; here the same path is a bind
+mount onto the archive drive, so every compose file works unchanged:
+
+```fstab
+/mnt/archive/appdata  /srv/appdata  none  bind,nofail,x-systemd.requires-mounts-for=/mnt/archive  0  0
+```
+
+`requires-mounts-for` matters: without it systemd can try the bind before the USB
+drive is mounted, and you get an empty `/srv/appdata` on the card instead of an
+error. **Archive, not active** — keeping the Plex database off the drive taking
+constant download writes is most of the benefit available on a Pi.
 
 **Why one disk holds everything torrents touch.** qBittorrent gets a single
 mount — `/mnt/active` as `/data` — so `incomplete/`, `movies/`, `tv/` and
@@ -141,11 +148,6 @@ mount — `/mnt/active` as `/data` — so `incomplete/`, `movies/`, `tv/` and
 rename instead of a copy, and it cannot regress into a copy later by someone
 pointing one category at the other disk — and the same one filesystem is what
 lets Radarr and Sonarr import by hardlink instead of copying (§8).
-
-That last point is why downloads stay on a USB drive rather than following the
-rest of the state onto the fast internal SSD: put `incomplete/` there and every
-completion becomes a cross-disk copy, while `MIN_FREE_SPACE_GB` starts guarding
-500 GB of system disk as the media drive silently fills.
 
 **The bigger drive is `active`, and that is not arbitrary.** It follows from the
 hardlinks. A 20 GB film seeding in `downloads/movies/` and named properly in
@@ -182,30 +184,30 @@ reserves 5% for root by default, which is pointless on a media drive:
 sudo tune2fs -m 1 /dev/sdXn      # ~45 GB back on the 1 TB, ~22 GB on the 500 GB
 ```
 
-**The internal 500 GB is meant to stay mostly empty.** Ubuntu, Docker's images
-and `/srv/appdata` together come to well under 100 GB, and the spare is
-deliberate headroom: Plex's metadata and thumbnails grow with the library, and
-`plex/transcode` is scratch that spikes. Resist the temptation to put media on
-it — `incomplete/` there would make every completion a cross-disk copy, and a
-library folder there could not be hardlinked from `downloads/`. Backup tarballs
-(§12) staged before they leave the box are the one other reasonable use.
+**What the 64 GB SD card holds, and what it must not.** Ubuntu — sorry, Raspberry
+Pi OS — plus the git checkouts is a few GB. The rest of it is Docker: image
+layers for eleven containers plus the build cache from `matte-vm`, which lands
+somewhere around 8–12 GB and grows with every rebuild. That is comfortable on
+64 GB, provided `docker image prune -f` keeps running — `bin/autodeploy` does it
+after every deploy, and §12 has it by hand.
+
+What must never be on the card is anything that writes constantly, which is the
+whole reason for the `/srv/appdata` bind mount above. If you want to go further,
+Docker's own `data-root` can be moved to the archive drive with
+`/etc/docker/daemon.json`, which takes image and build-layer churn off the card
+too. The cost is real, though: Docker then refuses to start at all if that drive
+is missing, where today it starts and only the volume-backed containers fail. On
+the mini PC this problem disappears — there, `/srv/appdata` is an ordinary
+directory on an internal SSD with a few hundred GB spare.
 
 Two disks is also the point at which a union filesystem (mergerfs) starts paying
 for itself, presenting both as one tree so nothing ever has to be moved by hand.
 It is not worth its mount-order failure modes at this size.
 
-### The installer's LVM default will hide 400 GB
-
-Ubuntu Server's guided LVM layout gives the root logical volume ~100 GB and
-leaves the rest of the volume group unallocated. Set the size during install, or
-afterwards:
-
-```bash
-sudo vgs && sudo lvs                       # VFree > 0 means this bit is needed
-sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
-sudo resize2fs /dev/ubuntu-vg/ubuntu-lv
-df -h /
-```
+**Power the USB drives properly.** Two SSDs on a Pi's own ports is the classic
+cause of a drive vanishing mid-write; use a powered hub, and check for brownouts
+with `vcgencmd get_throttled` (`0x0` is what you want). This is also why `nofail`
+below is not optional.
 
 ### Mount the USB drives at boot
 
@@ -221,8 +223,9 @@ emergency mode with no network, which on a headless machine means a keyboard
 hunt. `noatime` cuts pointless writes.
 
 ```bash
-sudo mkdir -p /mnt/active /mnt/archive
-sudo mount -a && df -h / /mnt/active /mnt/archive
+sudo mkdir -p /mnt/active /mnt/archive /srv/appdata
+sudo mount -a && df -h / /mnt/active /mnt/archive /srv/appdata
+findmnt /srv/appdata      # must show the USB device, not the SD card
 ```
 
 ## 2. Dependencies
@@ -231,22 +234,14 @@ sudo mount -a && df -h / /mnt/active /mnt/archive
 | --- | --- | --- |
 | Docker Engine | everything | Docker's apt repo — see below |
 | Docker Compose **v2.20+** | the `include:` top-level key | `docker compose version` |
-| git | deploys are `git fetch` | preinstalled |
-| python3 | autodeploy helpers, qbt password tool | preinstalled (3.12) |
-| curl | health checks | preinstalled |
-| jq | health checks | `sudo apt install jq` |
+| git | deploys are `git fetch` | `sudo apt install git` |
+| python3 | autodeploy helpers, qbt password tool | preinstalled |
+| curl, jq | health checks | `sudo apt install curl jq` |
 | `/dev/net/tun` | gluetun's VPN device | present by default |
-| `/dev/dri/renderD128` | Plex Quick Sync (§8) | present once `i915` loads |
 
-**Install Docker from Docker's own repo.** Two Ubuntu-flavoured ways to get this
-wrong:
-
-- `snap install docker` — **never.** Snap's strict confinement blocks bind
-  mounts outside `/home` and `$SNAP_DATA`, which is every volume in this stack,
-  and the failure looks like an empty container directory rather than an error.
-  If it is already there: `sudo snap remove --purge docker`.
-- `apt install docker.io` — Ubuntu's package is too old. Below Compose v2.20
-  `include:` is silently unsupported and the whole assembly quietly does nothing.
+**Install Docker from Docker's own repo**, not Debian's. `apt install docker.io`
+gives a Compose below v2.20, where the `include:` key is silently unsupported and
+the whole assembly quietly does nothing.
 
 ```bash
 curl -fsSL https://get.docker.com | sh   # adds Docker's apt repo, installs both
@@ -277,29 +272,26 @@ docker compose logs gluetun | grep -i 'public ip'
 # want: "Public IP address is ... (Sweden ...)"
 ```
 
-**The render group, for Plex hardware transcoding.** The gid differs between
-installs, so it is a variable rather than a literal in the compose file:
+**No overlay to select** in `~/stack/.env` — the one line that differs from the
+mini PC (§3), now that WireGuard has removed the last Pi-specific compose
+override:
 
-```bash
-ls -l /dev/dri/renderD128                # must exist
-getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.env
+```dotenv
+COMPOSE_FILE=compose.yaml
 ```
 
-**Three Ubuntu defaults worth knowing before they surprise you**
+`RENDER_GID` stays blank; nothing here reads it. Plex has no hardware it can
+transcode with on a Pi, so plan for direct play — see §8.
 
-- **`unattended-upgrades` is on.** It will update `docker-ce` and restart the
-  daemon, which restarts every container. `restart: unless-stopped` recovers,
-  but a gluetun restart interrupts every active torrent (§12). To stop that:
-  `sudo apt-mark hold docker-ce docker-ce-cli containerd.io`, and update Docker
-  deliberately instead.
-- **`ufw` does not filter published container ports.** Docker inserts its own
-  rules ahead of ufw's chains, so anything in a `ports:` block is reachable on
-  the LAN whatever ufw claims. Close a port by deleting the `ports:` entry, not
-  with a firewall rule.
-- **systemd-resolved** puts `127.0.0.53` in `/etc/resolv.conf`. Docker sees a
-  loopback-only resolver and gives bridge containers public DNS instead, logging
-  a warning at daemon start. Harmless here — it makes cloudflared's `dns:` block
-  redundant rather than wrong.
+**Two Pi-specific things to keep an eye on**
+
+- **Undervoltage silently halves throughput.** `vcgencmd get_throttled` should
+  return `0x0`; anything else means the supply or the USB drives are pulling more
+  than the Pi can give, and the symptom shows up as stalled torrents rather than
+  as an error.
+- **SD card wear is the failure mode that ends the box.** Nothing but the OS and
+  the git checkouts belongs on it — see the bind mount in §1, and confirm with
+  `findmnt /srv/appdata` after any reboot that changed the disks.
 
 **Accounts and secrets to have in hand**
 
@@ -513,7 +505,8 @@ cd ~ && git clone git@github.com:<you>/server_stack.git stack
 cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.env
 
 # 3. data directories, owned by the container user
-#    internal SSD: container state.  USB drives: bulk media only.
+#    /srv/appdata is the bind mount onto the archive drive (§1) — check it first.
+findmnt /srv/appdata || { echo "bind mount missing; fix /etc/fstab"; exit 1; }
 sudo mkdir -p /srv/appdata/media/{gluetun,qbittorrent,prowlarr,radarr,sonarr,bazarr,plex/{config,transcode}}
 sudo mkdir -p /srv/appdata/home/{homeassistant,mosquitto,zigbee2mqtt}
 sudo mkdir -p /srv/appdata/apps/{jellyseerr,kometa,matte-vm}
@@ -1032,66 +1025,45 @@ different app — Calibre-web or Kavita for ebooks and magazines, Audiobookshelf
 for audiobooks. Adding one is §10, and it would mount `/mnt/active/books`
 read-only; nothing about the layout has to change first.
 
-**What to prefer when picking a release.** Hardware transcoding removes most of
-the reason to care about format. Two things it does not fix:
+**No hardware transcoding.** A Pi has no video engine Plex can use, so every
+transcode is software and will not keep up with 1080p, let alone 4K. That makes
+format selection the whole game here, where on the mini PC it is mostly a
+detail — this is the single biggest thing the move changes (§15).
 
-- **Subtitles cost more than the codec does.** Burning in a subtitle forces a
-  transcode by definition — direct play is impossible once a frame has to be
-  redrawn. Text subtitles (SRT, ASS) are sent to the client and drawn there for
-  free; image subtitles (PGS from Blu-ray, VOBSUB from DVD) are the ones almost
-  no client can draw, so Plex burns them in. That is the whole difference
-  between a 1080p WEB-DL with an SRT, which direct plays, and the same film as a
-  Blu-ray remux with PGS, which transcodes every single time.
+**What to prefer when picking a release.** The target is direct play, every
+time: match the library to what the clients decode natively and nothing has to
+be re-encoded.
+
+- **Subtitles are the usual culprit, not the codec.** Burning in a subtitle
+  forces a transcode by definition — direct play is impossible once a frame has
+  to be redrawn — and on a Pi that transcode is software, so it buffers. Text
+  subtitles (SRT, ASS) are sent to the client and drawn there for free; image
+  subtitles (PGS from Blu-ray, VOBSUB from DVD) are the ones almost no client
+  can draw, so Plex burns them in. That is the whole difference between a 1080p
+  WEB-DL with an SRT and the same film as a Blu-ray remux with PGS.
 
   A true *hardsub* release — subtitles already painted into the picture, common
   in anime rips — is not the same thing and costs nothing, because there is
   nothing left for Plex to overlay.
 
-- **4K HDR is the case this box can still lose.** A 4K file the client direct
-  plays is free. A 4K HDR file that has to be transcoded also needs HDR→SDR tone
-  mapping, which is the most expensive thing Quick Sync does here and looks
-  washed out even when it keeps up. Prefer 1080p unless the client that matters
-  can direct play 4K HEVC.
-
-Beyond those, don't constrain anything: H.264 vs HEVC, MKV vs MP4, DTS vs AC3
-are all absorbed at 1080p without the N95 noticing, and `MAX_TORRENT_SIZE_GB=25`
-already keeps 4K remuxes and most 1080p ones out — which filters most PGS
-sources as a side effect.
+- **Skip 4K and HDR entirely.** Nothing here can transcode it, and an HDR file
+  played on an SDR client needs tone mapping the Pi cannot do at all.
+- **Prefer H.264 1080p** over HEVC where there is a choice: older clients decode
+  it natively far more often, and a client that cannot decode HEVC means a
+  software transcode.
 
 Three settings make it stick:
 
 | Where | Setting |
 | --- | --- |
-| Server → Transcoder | hardware acceleration **and** hardware-accelerated encoding on |
 | Each client → Playback | *Burn subtitles* → **Only image formats**, never *Always* |
+| Each client → Playback | disable *Convert automatically for this device* |
 | Server → Agents / a subtitle agent | let Plex fetch SRTs, so an embedded PGS is never the only option |
 
 When something buffers, the dashboard says why rather than leaving you to guess:
-hover the active stream and it names Direct Play, Direct Stream or Transcode,
-marks an offloaded transcode `(hw)`, and gives the reason — `subtitle burn-in`
-and `container not supported` being the two you will actually see. Software
-transcoding of 1080p on this box is a misconfiguration, not a capacity limit.
-
-**Hardware transcoding (Quick Sync)** — mini PC only; the Pi has no hardware
-Plex can use, so on the `pi` branch expect direct play and stop here.
-
-The N95's iGPU does H.264 and HEVC in hardware. `hw/x86.yaml` passes `/dev/dri`
-and joins the host's `render` group via `RENDER_GID` (§3); the remaining
-steps are *Settings → Transcoder →* tick **Use hardware acceleration when
-available** (and HW-accelerated video encoding), which needs **Plex Pass**.
-Verify a transcode is actually offloaded:
-
-```bash
-ls -l /dev/dri/renderD128                            # host: device exists
-docker compose exec plex ls -l /dev/dri/renderD128    # container: readable
-sudo apt install intel-gpu-tools && sudo intel_gpu_top   # Video engine busy
-```
-
-The dashboard marks an offloaded stream `(hw)`. `permission denied` on
-`renderD128` inside the container means `RENDER_GID` does not match
-`getent group render` on this host. If `/dev/dri` is missing *inside* the
-container while present on the host, `COMPOSE_FILE` is not selecting
-`hw/x86.yaml`, or something passed `-f` (§3).
+hover the active stream and it names Direct Play, Direct Stream or Transcode, and
+gives the reason — `subtitle burn-in` and `container not supported` being the two
+you will actually see. On this box any Transcode at all is the problem.
 
 ### Jellyseerr (`http://<host>:5055`, `requests.bjorngreen.se`)
 
@@ -1715,13 +1687,11 @@ matte-vm's SQLite file are not.
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `services.cloudflared conflicts with imported resource` | an included app compose file defines its own cloudflared | include a stack-owned fragment under `apps/` instead (§10) |
-| a container's config directory is empty and never persists | Docker installed from **snap**; confinement blocks binds outside `/home` | `snap remove --purge docker`, reinstall from Docker's repo (§2) |
-| plex: `permission denied` opening `/dev/dri/renderD128` | `RENDER_GID` ≠ the host's render gid | `getent group render \| cut -d: -f3`, fix `.env`, recreate plex |
-| transcodes stay software-only despite `/dev/dri` | Plex Pass missing, or the Transcoder setting not ticked | §8 |
-| `/dev/dri` present on the host, absent in the container | `docker compose` was given `-f`, or `COMPOSE_FILE` omits `hw/x86.yaml` | run bare `docker compose` from `~/stack` (§3) |
-| `/` is ~100 GB on a 500 GB disk | Ubuntu's guided LVM left the VG unallocated | `lvextend -l +100%FREE` + `resize2fs` (§1) |
-| a published port is reachable despite a ufw rule | Docker's rules sit ahead of ufw's chains | delete the `ports:` entry; ufw cannot close it (§2) |
-| every container restarted overnight | `unattended-upgrades` updated docker-ce | `apt-mark hold` the docker packages (§2) |
+| `/srv/appdata` is empty after a reboot, and the card is filling | the bind mount ran before the USB drive was ready | `x-systemd.requires-mounts-for` in `/etc/fstab` (§1), then `findmnt /srv/appdata` |
+| torrents stall, throughput collapses, no errors | undervoltage | `vcgencmd get_throttled` — anything but `0x0` means the supply or a bus-powered drive (§2) |
+| a USB drive vanishes mid-write | Pi ports cannot power two SSDs | powered hub; `nofail` keeps the box bootable meanwhile (§1) |
+| Plex buffers on anything but direct play | software transcoding on a Pi | expected — §8; the mini PC is the fix |
+| `include:` appears to be ignored | Compose older than v2.20, i.e. Debian's `docker.io` | install from Docker's repo (§2) |
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
@@ -1751,7 +1721,7 @@ matte-vm's SQLite file are not.
 | `502`/`530` from a public hostname | cloudflared cannot resolve or reach the service | service name and **container** port; is it in the same project? |
 | Cloudflare hostname 404s all assets | a Path prefix was set | leave Path empty, use a subdomain |
 | `docker compose exec qbittorrent curl ifconfig.me` shows the ISP IP | namespace sharing not in effect | check `network_mode`, recreate |
-| Ubuntu stuck at boot with no network | a USB SSD did not mount | `nofail` in `/etc/fstab` (§1) |
+| the Pi stuck at boot with no network | a USB SSD did not mount | `nofail` in `/etc/fstab` (§1) |
 | that same command hangs | gluetun killswitch, usually DNS | `docker compose logs gluetun` |
 | Plex shows half-finished files | downloading straight into a library | set the incomplete path (§8) |
 | finished torrents take minutes to "move" | a category path escaped the `/data` mount | every category lives under `/data`, one disk (§1, §8) |
@@ -1790,13 +1760,13 @@ matte-vm's SQLite file are not.
 - Secrets live in `~/stack/.env` (0600, gitignored). They are still visible to
   `docker inspect` and `docker compose config` — that is a local-access
   exposure, not a network one.
-- **`ufw` is not part of the posture.** Docker's rules run ahead of ufw's, so
-  enabling it does not close a published port (§2); what keeps the LAN-only
-  services LAN-only is that no router port is forwarded. Removing a `ports:`
-  entry is the real control.
-- Ubuntu's `unattended-upgrades` keeps the host patched, which is worth having;
-  if you `apt-mark hold` the docker packages to stop surprise restarts (§2),
-  updating them stays your job.
+- A firewall is not part of the posture, and adding one would not help: Docker
+  writes its rules ahead of anything ufw or nftables sets up, so a published port
+  stays reachable on the LAN regardless. What keeps the LAN-only services
+  LAN-only is that no router port is forwarded. Removing a `ports:` entry is the
+  real control.
+- Keep the host patched by hand — Raspberry Pi OS does not do it for you:
+  `sudo apt update && sudo apt full-upgrade`.
 - Rotate anything that has ever been pasted into a chat, an issue or a paste
   site: NordVPN service credentials, the tunnel token, and any of the app API
   keys — Prowlarr's in particular, since it fronts the tracker account.
@@ -1822,16 +1792,24 @@ Within §15b the mountpoint swap comes first and is not optional: `/mnt/active`
 and `/mnt/archive` do not exist yet, so every path in the steps after it is
 wrong until fstab has been changed and the drives remounted.
 
-### 15a. Run this on the Pi now — the `pi` branch
+### 15a. Where you are
+
+You are on the `pi` branch, which exists so the whole setup can be proven on the
+Pi before the mini PC arrives. It differs from `main` in this file only — the
+hardware, dependency, setup, troubleshooting and security sections — plus the
+default `COMPOSE_FILE` in `.env.example`. Every compose file is byte-identical,
+so anything you fix in one is a fix in both.
+
+Keep it that way. A change to a compose file, `bin/`, or `hw/` belongs on `main`:
 
 ```bash
-cd ~/stack && git fetch && git checkout pi
+git stash && git checkout main && git stash pop   # then commit, then rebase pi
 ```
 
-The `pi` branch differs from `main` in this file only — the hardware, dependency,
-setup and troubleshooting sections — plus the default `COMPOSE_FILE` in
-`.env.example`. Every compose file is byte-identical, because the real hardware
-difference is the absent Quick Sync overlay, which is one line in `.env` (§3):
+Only edit this file here, and only the sections listed above — that is what keeps
+`git rebase main` on this branch a no-op. Every compose file is byte-identical;
+the only other difference is `COMPOSE_FILE` in `.env.example`, because the Pi
+takes no hardware overlay (§3):
 
 ```dotenv
 COMPOSE_FILE=compose.yaml
@@ -2153,7 +2131,8 @@ all.
 
 ### 15e. Moving to the mini PC
 
-By this point the layout is proven and the move is mostly cabling.
+By this point the layout is proven and the move is mostly cabling. On the new box
+you clone `main`, not this branch.
 
 ```bash
 # on the Pi
@@ -2167,6 +2146,7 @@ Then on the mini PC, after §1–§3 and before first start (§7 step 5):
 | --- | --- |
 | `/srv/appdata` | untar; `chown -R 1000:1000` afterwards |
 | `~/stack/.env` | untar, then set `COMPOSE_FILE=compose.yaml:hw/x86.yaml` and fill `RENDER_GID` |
+| `/srv/appdata` | on the mini PC this is a real directory on the internal SSD, so drop the bind mount line from `/etc/fstab` |
 | both USB drives | unplug, replug, fix the UUIDs in `/etc/fstab` |
 | `~/git/*` | plain `git clone`; nothing in a checkout is state any more |
 
