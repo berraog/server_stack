@@ -35,6 +35,12 @@ services:
     volumes:
       - /srv/appdata/gluetun:/gluetun
     # EVERY port for every container in gluetun's namespace is published here.
+    #
+    # These make the services reachable from the LAN. Publishing 6881 does NOT
+    # make you connectable to peers on the internet: qBittorrent announces the
+    # VPN exit node's address, so inbound traffic never reaches this host. Real
+    # seeding needs a provider that forwards a port, which NordVPN does not do
+    # — README §8, "Why nothing uploads".
     ports:
       - "8080:8080"      # qBittorrent WebUI
       - "6881:6881"      # torrent TCP

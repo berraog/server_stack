@@ -551,6 +551,66 @@ docker compose logs qbittorrent | grep -i "temporary password"
 #     and paste the line under [Preferences]
 ```
 
+#### Why nothing uploads
+
+Almost certainly not a qBittorrent setting: **NordVPN does not do port
+forwarding.** Seeding effectively requires other peers to be able to open a
+connection *to* you, and every route inbound is closed here:
+
+- qBittorrent lives in gluetun's network namespace, so it announces the VPN exit
+  node's address to the tracker. Peers dutifully try to reach you there, and
+  NordVPN drops it — there is no port on their side mapped back to you.
+- The `6881` published on gluetun in `media/compose.yaml` does **not** change
+  that, and this is the misconception worth killing: publishing a port makes it
+  reachable from your LAN, not from the internet. Inbound WAN traffic never
+  arrives at the host at all, because the tracker never told anyone your home
+  address.
+- Forwarding 6881 on the router would not help either, for the same reason — and
+  §14 keeps router ports closed on purpose.
+
+So you are permanently "firewalled" in BitTorrent's terms. qBittorrent says so
+itself: the status bar shows a red network icon and *No direct connections*.
+Outbound-only, you can still upload to leechers you happen to connect to, which
+on a private tracker's small, mostly-seeded swarms rounds to nothing. That
+matches the symptom exactly.
+
+**The fix is a provider that forwards a port**, and gluetun can obtain one
+automatically from ProtonVPN or Private Internet Access. It bundles well with the
+WireGuard switch (§2), since that is both faster than OpenVPN and the usual way
+these providers hand out a port. The shape, with gluetun's own documentation as
+the authority on exact variable names — they have moved between versions:
+
+```yaml
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - VPN_PORT_FORWARDING=on
+      # The assigned port changes on reconnect, so push it into qBittorrent
+      # rather than hardcoding one. Enable "Bypass authentication for clients on
+      # localhost" in qBittorrent first, or this call gets a 403.
+      - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'wget -qO- --post-data="json={\"listen_port\":{{PORTS}}}" http://127.0.0.1:8080/api/v2/app/setPreferences'
+```
+
+Until then the bonus-point system is doing the work, and that is a perfectly
+reasonable place to sit — but it depends on torrents staying **active**, which
+brings us to the settings that can still stop you seeding even after inbound
+works.
+
+#### Settings that silently prevent seeding
+
+| Setting | Trap |
+| --- | --- |
+| *Options → Speed → Global upload rate* | **`0` means unlimited, not zero.** To seed at a limited speed put a real number in, e.g. `2000` KiB/s. Leaving it at 0 is not what is stopping you. |
+| *Options → BitTorrent → Seeding Limits* | if "when ratio reaches" or "when seeding time reaches" is set to *Stop torrent*, torrents park themselves and the bonus clock stops |
+| *Options → Connection → Use UPnP/NAT-PMP* | turn it **off**; it cannot work through the VPN namespace and only adds log noise |
+| *Options → BitTorrent → Anonymous mode* | off — it suppresses information private trackers expect |
+| Radarr/Sonarr → *Download Clients → Remove Completed* | **the one that matters for you.** If Radarr deletes the torrent as soon as it has imported, the torrent stops being active and the bonus accrual with it. Set real seeding goals in qBittorrent and let Radarr clean up only after they are met. |
+
+That last row is worth dwelling on, because it interacts with the hardlinks (§1).
+Keeping a torrent seeding keeps the `downloads/` name alive alongside the
+`library/` one — which costs nothing, since they are the same inode. There is no
+disk-space reason to remove torrents early, and on a tracker that pays you for
+uptime there is a reason not to.
+
 ### Prowlarr (`http://<host>:9696`)
 
 Prowlarr is the indexer proxy: it holds the TorrentDay credentials once, and
@@ -1111,6 +1171,8 @@ matte-vm's SQLite file are not.
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
 | `qBittorrent login failed` | temporary password rotated on restart | permanent password + subnet whitelist (§8) |
+| upload is always 0 and the status bar shows *No direct connections* | NordVPN forwards no port, so nobody can connect in | structural — §8, "Why nothing uploads" |
+| torrents stop by themselves shortly after finishing | a qBittorrent seeding limit, or Radarr removing completed downloads | §8; on a tracker paying for uptime, both are worth turning off |
 | a download completes and Radarr never imports it | the download client and Radarr disagree about the path | both must mount `/mnt/active` as `/data` (§8); *Activity → Queue* names the path it tried |
 | imports copy instead of hardlinking, and the disk fills twice | `downloads/` and `library/` are on different filesystems, or *Use Hardlinks* is off | both live under `/mnt/active` (§1); confirm with `ls -l` showing link count 2 on an imported file |
 | Bazarr's library is empty | Radarr/Sonarr not connected, or connected with the wrong port | `radarr:7878`, `sonarr:8989` — bridge names, not `gluetun` (§8) |
