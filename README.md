@@ -250,6 +250,28 @@ id -u; id -g                             # expect 1000/1000 — the PUID/PGID ev
 docker compose version                   # must be >= v2.20.0
 ```
 
+**The NordLynx private key.** gluetun runs NordVPN over WireGuard, which
+authenticates with a key instead of a username and password. Nord does not put it
+in the dashboard, but their API will hand it over:
+
+```bash
+# Nord dashboard → NordVPN → Manual setup → generate an access token
+curl -s -u token:<ACCESS_TOKEN> https://api.nordvpn.com/v1/users/services/credentials \
+  | jq -r .nordlynx_private_key
+```
+
+That value goes in `WIREGUARD_PRIVATE_KEY`. If the endpoint has moved, gluetun's
+own NordVPN documentation is the place to look — it tracks this. Failing that,
+Nord's Linux client stores the same key once connected, readable with
+`sudo wg show nordlynx private-key`.
+
+Confirm the tunnel is actually up before anything else starts (§7):
+
+```bash
+docker compose logs gluetun | grep -i 'public ip'
+# want: "Public IP address is ... (Sweden ...)"
+```
+
 **The render group, for Plex hardware transcoding.** The gid differs between
 installs, so it is a variable rather than a literal in the compose file:
 
@@ -278,7 +300,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
 
 | Needed | Where it comes from |
 | --- | --- |
-| NordVPN **service credentials** | Nord dashboard → NordVPN → Manual setup → Service credentials. *Not* your login email/password. |
+| NordVPN **NordLynx private key** | see below. *Not* your login, and not the OpenVPN service credentials either. |
 | Cloudflare account + `bjorngreen.se` on it | dash.cloudflare.com |
 | Cloudflare tunnel token | Zero Trust → Networks → Tunnels → Create → Docker → the `TUNNEL_TOKEN` value |
 | TorrentDay account | for the Prowlarr indexer (cookie auth) |
@@ -296,7 +318,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
   apps/matte-vm.yaml              one fragment per standalone app
   apps/jellyseerr.yaml            third-party image, same shape
   apps/kometa.yaml                scheduled job: no port, no hostname
-  hw/x86.yaml, hw/pi.yaml         per-hardware overlays, picked in .env
+  hw/x86.yaml                     the only per-hardware overlay, picked in .env
   bin/autodeploy                  poll git, redeploy what changed
   autodeploy.conf                 repo -> service map
   systemd/autodeploy.{service,timer}   installed into /etc (§11)
@@ -356,13 +378,19 @@ worth knowing before opening them:
 
 ### Hardware overlays
 
-Two things genuinely differ between the mini PC and the Pi — Plex's Quick Sync
-device and the VPN cipher — so they live in [`hw/`](hw) rather than in the files
-above, and `.env` picks one:
+Exactly one thing genuinely differs between the mini PC and the Pi — Plex's Quick
+Sync device — so it lives in [`hw/x86.yaml`](hw) rather than in the files above,
+and `.env` picks it up:
 
 ```dotenv
-COMPOSE_FILE=compose.yaml:hw/x86.yaml    # or hw/pi.yaml
+COMPOSE_FILE=compose.yaml:hw/x86.yaml    # the Pi uses just compose.yaml
 ```
+
+There used to be a `hw/pi.yaml` as well, holding an `AES-128-GCM` cipher pin for
+a CPU without AES-NI. Moving to WireGuard deleted it: WireGuard has a single
+cipher suite, ChaCha20-Poly1305, which is not configurable and happens to be the
+faster choice on hardware without AES acceleration anyway. The Pi therefore needs
+no overlay at all. Add the file back if a Pi-only override ever appears.
 
 Compose reads `COMPOSE_FILE` from `.env`, so this is the only line that differs
 between the two machines and every other file stays byte-identical. Two
@@ -442,7 +470,7 @@ is the one file that cannot be reconstructed from the repos.
 
 | Setting | Checked by | Supplied by |
 | --- | --- | --- |
-| `NORDVPN_SERVICE_*` | NordVPN | gluetun |
+| `WIREGUARD_PRIVATE_KEY` | NordVPN | gluetun |
 | `CLOUDFLARE_TUNNEL_TOKEN` | Cloudflare | cloudflared |
 | qBittorrent's WebUI login | qBittorrent's API | Radarr, Sonarr and Prowlarr, each in its own UI |
 | Prowlarr's / Radarr's / Sonarr's API keys | each other | entered in each app's UI, never in `.env` |
@@ -588,12 +616,14 @@ fine:
 Only seeding is missing, and the bonus system is already covering the ratio. So
 there is a legitimate do-nothing option here.
 
-**Free improvement either way: switch NordVPN to WireGuard.** Faster and lower
-latency than OpenVPN, no subscription change, and it is what you would be running
-after a provider change anyway. It needs a private key rather than a
-username/password — Nord's dashboard generates a manual WireGuard config, and
-gluetun's docs also cover pulling it with an API token. The commented block in
-`media/compose.yaml` has the shape.
+**A dedicated IP does not fix this, and might make it worse.** Nord's dedicated
+IP add-on gives you an address nobody else shares, which solves CAPTCHAs,
+shared-IP blocklists and services that want to whitelist you. It does not include
+port forwarding — there is still nothing on Nord's side mapping an inbound port
+back down your tunnel, which is the only thing that would make you connectable.
+Worse, it is a distinct server type from the P2P-optimised ones, so check whether
+P2P traffic is even permitted on it before paying; buying it for this could cost
+you the working downloads you have.
 
 **If you want seeding, it is a provider change.** What matters is whether they
 forward a port and whether gluetun can ask for it automatically:
@@ -1285,10 +1315,10 @@ cd ~/stack && git fetch && git checkout pi
 The `pi` branch differs from `main` in this file only — the hardware, dependency,
 setup and troubleshooting sections — plus the default `COMPOSE_FILE` in
 `.env.example`. Every compose file is byte-identical, because the real hardware
-difference is `hw/pi.yaml`, selected by one line in `.env` (§3):
+difference is the absent Quick Sync overlay, which is one line in `.env` (§3):
 
 ```dotenv
-COMPOSE_FILE=compose.yaml:hw/pi.yaml
+COMPOSE_FILE=compose.yaml
 ```
 
 `RENDER_GID` stays blank there; nothing on the Pi reads it.

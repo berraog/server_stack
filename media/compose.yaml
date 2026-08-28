@@ -11,8 +11,10 @@
 #    is a hardlink; one shared spelling means the path qBittorrent reports is
 #    the path Radarr can open. README §1 and §13.
 #
-# Hardware-specific bits (Quick Sync, VPN cipher) live in ../hw/, selected by
-# COMPOSE_FILE in ~/stack/.env. The automation layer is ./arr.yaml.
+# Hardware-specific bits live in ../hw/, selected by COMPOSE_FILE in
+# ~/stack/.env — only Quick Sync now, since WireGuard has a single cipher suite
+# and removed the last reason for a Pi-specific override. ./arr.yaml holds the
+# automation layer.
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
@@ -21,26 +23,15 @@ services:
     devices: [/dev/net/tun]
     environment:
       - VPN_SERVICE_PROVIDER=nordvpn
-      - VPN_TYPE=openvpn
-      - OPENVPN_PROTOCOL=udp
-      #
-      # WireGuard instead, on the same NordVPN subscription: faster and lower
-      # latency, and no more OPENVPN_* below. It authenticates with a private
-      # key rather than the service credentials — generate a manual WireGuard
-      # config in Nord's dashboard and take the key from it. This does NOT gain
-      # you seeding; NordVPN forwards no port either way (README §8).
-      #   - VPN_TYPE=wireguard
-      #   - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:?set in ~/stack/.env}
-      #
-      # A provider that forwards a port, if seeding matters more than the
-      # remaining Nord subscription — see the table in README §8.
-      #   - FIREWALL_VPN_INPUT_PORTS=<the forwarded port>   # static-port providers
-      # Carried over from the Pi, where it fixed fragmentation on this ISP.
-      # Raise or drop it if throughput disappoints; revert if torrents stall.
-      - VPN_MTU=1320
-      # Nord *service* credentials, not the login email/password.
-      - OPENVPN_USER=${NORDVPN_SERVICE_USER:?set in ~/stack/.env}
-      - OPENVPN_PASSWORD=${NORDVPN_SERVICE_PASS:?set in ~/stack/.env}
+      - VPN_TYPE=wireguard
+      # NordLynx authenticates with a key, not the service credentials — see
+      # README §2 for how to extract it. Nothing else replaces it.
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:?set in ~/stack/.env}
+      # Carried over from the OpenVPN setup, where 1320 fixed fragmentation on
+      # this ISP. gluetun's WireGuard default is 1400; too low costs a little
+      # throughput, too high stalls transfers, so this errs low deliberately.
+      # Raise it if you want the last few percent.
+      - WIREGUARD_MTU=1320
       - SERVER_COUNTRIES=Sweden
       - TZ=${TZ:-Europe/Stockholm}
       - UPDATER_PERIOD=24h
