@@ -1,0 +1,30 @@
+# The whole machine, assembled from one compose file per stack.
+#
+# `include:` resolves each file's relative paths against THAT file's own
+# directory, so an app's `build: .` keeps meaning its own repo. Every included
+# service joins this project's default network and is reachable by service name
+# — which is how cloudflared below finds them.
+#
+# An include whose repo is not cloned yet fails the whole project, so clone the
+# app repos into ~/git first (README §7) or comment the line out.
+include:
+  - media/compose.yaml
+  - ../git/matte-vm/docker-compose.yml
+
+services:
+  # The only cloudflared on the box. Every public hostname points at a service
+  # in this project, resolved by name over the shared default network.
+  # Hostnames are added in the Cloudflare dashboard (README §9), not here: a
+  # token-based tunnel is remotely managed and ignores a local config.yml.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?set in ~/stack/.env}"
+    # Docker keeps its own resolver at 127.0.0.11 inside the container and uses
+    # these only as upstreams for external names, so service discovery survives.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    restart: unless-stopped

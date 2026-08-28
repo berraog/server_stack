@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Redeploy a compose service when its repo has moved upstream.
+# Reads ~/stack/autodeploy.conf: "<repo path> <compose service> [branch]"
+#
+# Polling, not webhooks: a `git fetch` every five minutes needs no inbound
+# endpoint, no self-hosted runner, and no secret that grants code execution.
+set -euo pipefail
+
+STACK="${STACK:-$HOME/stack}"
+CONF="$STACK/autodeploy.conf"
+COMPOSE=(docker compose -f "$STACK/compose.yaml")
+
+# fd 3, not stdin: git and docker would otherwise eat the config file.
+while read -r repo service branch <&3; do
+  [[ -z "${repo:-}" || $repo == \#* ]] && continue
+  branch="${branch:-main}"
+
+  git -C "$repo" fetch --quiet origin "$branch"
+  local_sha=$(git -C "$repo" rev-parse HEAD)
+  remote_sha=$(git -C "$repo" rev-parse "origin/$branch")
+  [[ "$local_sha" == "$remote_sha" ]] && continue
+
+  echo "$(date -Is) $repo ${local_sha:0:8} -> ${remote_sha:0:8}"
+  # Deploy checkout: upstream always wins, local edits here are discarded.
+  git -C "$repo" reset --hard "origin/$branch"
+
+  # A broken fragment must never take the running stack down with it.
+  "${COMPOSE[@]}" config -q
+  # --no-deps: without it a rebuild can recreate gluetun, which restarts
+  # qBittorrent and Prowlarr and interrupts every active torrent.
+  "${COMPOSE[@]}" up -d --build --no-deps "$service"
+done 3< "$CONF"
+
+docker image prune -f >/dev/null   # old layers fill a small disk fast

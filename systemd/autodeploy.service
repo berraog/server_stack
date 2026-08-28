@@ -1,0 +1,10 @@
+[Unit]
+Description=Redeploy changed stack services
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=bjorngreen
+WorkingDirectory=/home/bjorngreen/stack
+ExecStart=/home/bjorngreen/stack/bin/autodeploy

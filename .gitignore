@@ -1,0 +1,4 @@
+# The one file that cannot be reconstructed from the repos — back it up
+# outside the Pi, but never here.
+.env
+*.bak

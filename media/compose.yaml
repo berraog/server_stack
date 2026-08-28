@@ -1,0 +1,117 @@
+# Media stack: VPN plus everything that must sit behind it.
+#
+# qbittorrent and prowlarr use `network_mode: "service:gluetun"`, so they have
+# no network identity of their own — see README §5 before changing anything
+# here. In short: reach them at http://gluetun:<port>, never by their own name,
+# and they may never carry a `ports:` block.
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun]
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=openvpn
+      - OPENVPN_PROTOCOL=udp
+      - OPENVPN_CIPHERS=AES-128-GCM
+      - VPN_MTU=1320
+      # Nord *service* credentials, not the login email/password.
+      - OPENVPN_USER=${NORDVPN_SERVICE_USER:?set in ~/stack/.env}
+      - OPENVPN_PASSWORD=${NORDVPN_SERVICE_PASS:?set in ~/stack/.env}
+      - SERVER_COUNTRIES=Sweden
+      - TZ=${TZ:-Europe/Stockholm}
+      - UPDATER_PERIOD=24h
+    volumes:
+      - /mnt/ssd/gluetun:/gluetun
+    # EVERY port for every container in gluetun's namespace is published here.
+    ports:
+      - "8080:8080"      # qBittorrent WebUI
+      - "6881:6881"      # torrent TCP
+      - "6881:6881/udp"  # torrent UDP
+      - "9696:9696"      # Prowlarr
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun: {condition: service_healthy}
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Europe/Stockholm}
+      - WEBUI_PORT=8080
+    volumes:
+      - /mnt/ssd/qbittorrent-config:/config
+      - /mnt/ssd/media:/downloads
+      - /mnt/ssd2/share/torrents/movies:/auto_movies
+      - /mnt/ssd2/share/torrents/tv:/auto_tv
+      - /mnt/ssd2/share/torrents/incomplete:/auto_incomplete
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun: {condition: service_healthy}
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      - /mnt/ssd/prowlarr-config:/config
+    restart: unless-stopped
+
+  finder:
+    build: ../../git/torrent_finder
+    container_name: torrent-finder
+    depends_on: [prowlarr]
+    environment:
+      - TZ=${TZ:-Europe/Stockholm}
+      # gluetun, not prowlarr/qbittorrent — see README §5.
+      - PROWLARR_URL=http://gluetun:9696
+      - PROWLARR_API_KEY=${PROWLARR_API_KEY:?set in ~/stack/.env}
+      - QBITTORRENT_URL=http://gluetun:8080
+      - QBITTORRENT_USERNAME=${QBITTORRENT_USERNAME:-admin}
+      - QBITTORRENT_PASSWORD=${QBITTORRENT_PASSWORD:?set in ~/stack/.env}
+      - MOVIES_SAVE_PATH=/auto_movies
+      - TV_SAVE_PATH=/auto_tv
+      - OTHER_SAVE_PATH=/downloads/other
+      - MAX_TORRENT_SIZE_GB=${MAX_TORRENT_SIZE_GB:-25}
+      - MIN_FREE_SPACE_GB=${MIN_FREE_SPACE_GB:-20}
+      - INDEXER_NAME=TorrentDay
+      # This app is published on the internet; refuse to start without auth.
+      - UI_USERNAME=${UI_USERNAME:?set in ~/stack/.env}
+      - UI_PASSWORD=${UI_PASSWORD:?set in ~/stack/.env}
+    ports:
+      - "8010:8000"    # LAN only; the tunnel uses the container port directly
+    restart: unless-stopped
+
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    network_mode: host          # needed for DLNA/GDM local discovery
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - VERSION=docker
+      - TZ=${TZ:-Europe/Stockholm}
+      # First run only; remove once the server is claimed. Token expires in 4
+      # minutes — https://plex.tv/claim
+      # - PLEX_CLAIM=${PLEX_CLAIM}
+    volumes:
+      - /mnt/ssd2/plex/config:/config
+      - /mnt/ssd2/plex/transcode:/transcode
+      - /mnt/ssd/media:/media
+      - /mnt/ssd2/share/torrents/movies:/movies2
+      - /mnt/ssd2/share/torrents/tv:/tv2
+    restart: unless-stopped
