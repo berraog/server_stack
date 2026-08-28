@@ -292,6 +292,17 @@ transcode with on a Pi, so plan for direct play — see §8.
 - **SD card wear is the failure mode that ends the box.** Nothing but the OS and
   the git checkouts belongs on it — see the bind mount in §1, and confirm with
   `findmnt /srv/appdata` after any reboot that changed the disks.
+- **Eleven containers is a lot for a Pi.** Radarr, Sonarr and Prowlarr are .NET,
+  Bazarr is Python and Jellyseerr is Node; idle they want roughly 1.5–2 GB
+  between them before Plex or a Kometa run. On 8 GB that is comfortable, on 4 GB
+  it is tight enough to watch for the OOM killer — `dmesg -T | grep -i oom` after
+  anything dies unexplained. Every image here publishes arm64, so nothing fails
+  to pull; it is memory, not architecture, that bites.
+
+  To leave one out, comment its line in `compose.yaml`'s `include:` rather than
+  deleting the fragment. `kometa` and `bazarr` are the two the box works fine
+  without, and Kometa in particular is a nightly batch job whose Plex API work is
+  slow here — it is a better fit for the mini PC.
 
 **Accounts and secrets to have in hand**
 
