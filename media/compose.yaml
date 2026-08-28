@@ -94,8 +94,13 @@ services:
       - QBITTORRENT_URL=http://gluetun:8080
       - QBITTORRENT_USERNAME=${QBITTORRENT_USERNAME:-admin}
       - QBITTORRENT_PASSWORD=${QBITTORRENT_PASSWORD:?set in ~/stack/.env}
+      # One category per directory. `other` is the residual — software, games,
+      # xxx, anything the classifier could not place — not "everything that is
+      # not video".
       - MOVIES_SAVE_PATH=/data/movies
       - TV_SAVE_PATH=/data/tv
+      - MUSIC_SAVE_PATH=/data/music
+      - BOOKS_SAVE_PATH=/data/books
       - OTHER_SAVE_PATH=/data/other
       - MAX_TORRENT_SIZE_GB=${MAX_TORRENT_SIZE_GB:-25}
       - MIN_FREE_SPACE_GB=${MIN_FREE_SPACE_GB:-20}

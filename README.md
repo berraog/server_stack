@@ -44,12 +44,22 @@ Three disks, three jobs:
 
 /mnt/active/           USB SSD — everything torrents touch
   incomplete/          qBittorrent's default save path AND its incomplete path
-  movies/  tv/         finished, and what Plex reads
-  other/               the `other` category; no Plex library
+  movies/  tv/         video; a Plex library each
+  music/               a Plex Music library
+  books/               ebooks, magazines, audiobooks — Plex reads none of these
+  other/               software, games, and whatever could not be classified
 
 /mnt/archive/          USB SSD — content moved off active once it fills
-  movies/  tv/         read-only to every container
+  movies/  tv/  ...    read-only; mirrors whichever active folders you move
 ```
+
+**One directory per qBittorrent category, and `other` means residual.** The
+finder classifies each release and routes it, so `other/` collects software,
+games and releases it could not place — not simply everything that is not video.
+§8 has the mapping. Inside `books/`, keep `audiobooks/`, `ebooks/` and
+`magazines/` as hand-filed subfolders if you want them apart: no indexer
+category separates them reliably enough to automate, and nothing on this box
+reads them yet anyway.
 
 **Why state is internal and media is not.** Plex's library is a SQLite database
 bound by random writes, so its location is the one you can actually feel; media
@@ -342,7 +352,8 @@ cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.
 # 3. data directories, owned by the container user
 #    internal SSD: container state.  USB drives: bulk media only.
 sudo mkdir -p /srv/appdata/{gluetun,qbittorrent,prowlarr,plex/config,plex/transcode,matte-vm}
-sudo mkdir -p /mnt/active/{incomplete,movies,tv,other} \
+sudo mkdir -p /mnt/active/{incomplete,movies,tv,music,books,other} \
+              /mnt/active/books/{audiobooks,ebooks,magazines} \
               /mnt/archive/{movies,tv}
 sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
 
@@ -392,11 +403,22 @@ docker compose logs qbittorrent | grep -i "temporary password"
    - **Keep incomplete torrents in**: `/data/incomplete`
 4. *Categories* (right-click the sidebar → Add category):
 
-   | Category | Save path | Host path | Plex sees |
-   | --- | --- | --- | --- |
-   | `movies` | `/data/movies` | `/mnt/active/movies` | `/active/movies` |
-   | `tv` | `/data/tv` | `/mnt/active/tv` | `/active/tv` |
-   | `other` | `/data/other` | `/mnt/active/other` | *(no library)* |
+   | Category | Save path | Host path | Plex sees | Routed when the finder says |
+   | --- | --- | --- | --- | --- |
+   | `movies` | `/data/movies` | `/mnt/active/movies` | `/active/movies` | `movie` |
+   | `tv` | `/data/tv` | `/mnt/active/tv` | `/active/tv` | `tv` |
+   | `music` | `/data/music` | `/mnt/active/music` | `/active/music` | `music` |
+   | `books` | `/data/books` | `/mnt/active/books` | *(no library)* | `book` |
+   | `other` | `/data/other` | `/mnt/active/other` | *(no library)* | anything else |
+
+   The last column is `app/classify.py` in the finder, which resolves a release
+   to one of `movie`, `tv`, `music`, `book`, `software`, `game`, `xxx` or
+   `other` from the indexer's category ids and the release name. Only the first
+   four get a category of their own; software, games, xxx and the unplaceable
+   share `other`, which is what keeps it a residual rather than a second
+   library. Audiobooks route to `books` — newznab files them under Audio
+   (3030) and TorrentDay calls them "Audio Books", and the finder overrides
+   both, because an audiobook belongs with the books.
 
    The finder creates any that are missing. If you set them here instead, drop
    the `*_SAVE_PATH` variables and it follows whatever qBittorrent says.
@@ -437,7 +459,16 @@ resolved against the real qBittorrent:
 docker compose logs finder | grep 'qBittorrent category'
 # movie -> qBittorrent category 'movies' at /data/movies
 # tv    -> qBittorrent category 'tv' at /data/tv
+# music -> qBittorrent category 'music' at /data/music
+# book  -> qBittorrent category 'books' at /data/books
 # other -> qBittorrent category 'other' at /data/other
+```
+
+Routing itself is covered by a test in the finder's repo, which needs no running
+services:
+
+```bash
+cd ~/git/torrent_finder && uv run python test_routing.py
 ```
 
 `/downloads/movies` in that output means the `*_SAVE_PATH` variables never
@@ -451,14 +482,20 @@ First run only: uncomment `PLEX_CLAIM`, put a fresh token from
 https://plex.tv/claim in `.env` (it expires in 4 minutes), start Plex, then
 remove it again. Two libraries, each spanning both disks:
 
-| Library | Folders |
-| --- | --- |
-| Movies | `/active/movies`, `/archive/movies` |
-| TV Shows | `/active/tv`, `/archive/tv` |
+| Library | Type | Folders |
+| --- | --- | --- |
+| Movies | Movies | `/active/movies`, `/archive/movies` |
+| TV Shows | TV Shows | `/active/tv`, `/archive/tv` |
+| Music | Music | `/active/music`, `/archive/music` |
 
 Both mounts are read-only, so Plex's own *delete media* does nothing. Deleting
-is the finder's job, via qBittorrent, which holds `/data` read-write. `other/`
-is deliberately outside any library.
+is the finder's job, via qBittorrent, which holds `/data` read-write.
+
+`books/` and `other/` are deliberately outside every library. Plex dropped ebook
+support years ago, so reading what lands in `books/` needs a different app —
+Kavita or Calibre-web for ebooks and magazines, Audiobookshelf for audiobooks.
+Adding one is §10, and it would mount `/mnt/active/books` read-only; nothing
+about the layout has to change first.
 
 **Hardware transcoding (Quick Sync)** — mini PC only; the Pi has no hardware
 Plex can use, so on the `pi` branch expect direct play and stop here.
@@ -754,16 +791,22 @@ mv /mnt/active/plex/config          /srv/appdata/plex/config
 cp -r ~/git/matte-vm/data/.         /srv/appdata/matte-vm/
 
 # the one real copy: `other` was on the wrong disk (see below)
+mkdir -p /mnt/active/{music,books/{audiobooks,ebooks,magazines}}
 mv /mnt/archive/media/other/* /mnt/active/other/ && rmdir /mnt/archive/media/other
 sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
 ```
 
-That last one is a genuine cross-disk copy, and it is fixing a bug rather than
+That `mv` is a genuine cross-disk copy, and it is fixing a bug rather than
 creating one: `other` used to save to `/downloads/other` on the *library* disk
 while qBittorrent's incomplete directory sat on the *torrent* disk, so every
 completed `other` download was already being copied between disks — the exact
 thing §1 forbids, on the one category nobody watches. Under `/data` it cannot
 happen again.
+
+Whatever is already in `other/` predates the split, so sort it into `music/` and
+`books/` by hand once — there is nothing to infer it from after the fact. New
+downloads route themselves (§8), and anything left behind stays readable where
+it is.
 
 ### 15c. Repointing qBittorrent's existing torrents
 
