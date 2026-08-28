@@ -47,9 +47,10 @@ SD card gets none of them:
 
 | Mount | Disk | Job |
 | --- | --- | --- |
-| `/srv/appdata` | internal 500 GB SSD | all container state; mostly empty on purpose |
 | `/mnt/active` | **1 TB USB** (the old `/mnt/ssd2`) | everything in flight and everything currently seeding |
-| `/mnt/archive` | **500 GB USB** (the old `/mnt/ssd`) | content aged off active; read-only to every container |
+| `/mnt/archive` | **500 GB USB** (the old `/mnt/ssd`) | content aged off active, plus `appdata/` |
+| `/srv/appdata` | a bind mount onto `/mnt/archive/appdata` | all container state — *not* a disk of its own here |
+| `/` | 64 GB SD card | OS, git checkouts, Docker images. Nothing that writes constantly. |
 
 ```
 /mnt/active/           1 TB USB — everything torrents touch
@@ -133,14 +134,26 @@ the Plex library is a SQLite database doing exactly that. On the mini PC this
 state sits on an internal SSD at `/srv/appdata`; here the same path is a bind
 mount onto the archive drive, so every compose file works unchanged:
 
+```bash
+sudo mkdir -p /mnt/archive/appdata /srv/appdata    # both must exist first
+```
+
 ```fstab
 /mnt/archive/appdata  /srv/appdata  none  bind,nofail,x-systemd.requires-mounts-for=/mnt/archive  0  0
 ```
 
-`requires-mounts-for` matters: without it systemd can try the bind before the USB
-drive is mounted, and you get an empty `/srv/appdata` on the card instead of an
-error. **Archive, not active** — keeping the Plex database off the drive taking
-constant download writes is most of the benefit available on a Pi.
+It goes *below* the `/mnt/archive` line, and `requires-mounts-for` is what makes
+it safe: without either, the bind can be attempted while the USB drive is still
+unmounted, which succeeds — on the SD card, silently, with no error to notice.
+Confirm every time the disks change:
+
+```bash
+findmnt /srv/appdata     # must name the USB device, not the card
+```
+
+**Archive, not active** — keeping the Plex database off the drive taking constant
+download writes is most of the benefit available on a Pi. §15b explains the line
+field by field if it is unfamiliar.
 
 **Why one disk holds everything torrents touch.** qBittorrent gets a single
 mount — `/mnt/active` as `/data` — so `incomplete/`, `movies/`, `tv/` and
@@ -184,10 +197,10 @@ reserves 5% for root by default, which is pointless on a media drive:
 sudo tune2fs -m 1 /dev/sdXn      # ~45 GB back on the 1 TB, ~22 GB on the 500 GB
 ```
 
-**What the 64 GB SD card holds, and what it must not.** Ubuntu — sorry, Raspberry
-Pi OS — plus the git checkouts is a few GB. The rest of it is Docker: image
-layers for eleven containers plus the build cache from `matte-vm`, which lands
-somewhere around 8–12 GB and grows with every rebuild. That is comfortable on
+**What the 64 GB SD card holds, and what it must not.** Raspberry Pi OS plus the
+git checkouts is a few GB. The rest of it is Docker: image layers for eleven
+containers plus the build cache from `matte-vm`, which lands somewhere around
+8–12 GB and grows with every rebuild. That is comfortable on
 64 GB, provided `docker image prune -f` keeps running — `bin/autodeploy` does it
 after every deploy, and §12 has it by hand.
 
