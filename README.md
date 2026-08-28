@@ -1125,10 +1125,62 @@ cd ~/stack && docker compose down     # containers hold the mounts busy
 lsblk -f                              # note both UUIDs; fstab needs them
 ```
 
-Now edit `/etc/fstab`: replace the two `/mnt/ssd` and `/mnt/ssd2` lines with the
-`/mnt/active` and `/mnt/archive` lines from §1. On the `pi` branch also add the
-`/srv/appdata` bind mount — it names `/mnt/archive` as its source, so it must
-come *after* that line, and it needs the `requires-mounts-for` option.
+Now edit `/etc/fstab`. Replace the two `/mnt/ssd` and `/mnt/ssd2` lines with
+these, using the UUIDs from `lsblk -f`:
+
+```fstab
+UUID=xxxx-xxxx  /mnt/active   ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+UUID=yyyy-yyyy  /mnt/archive  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+```
+
+#### On the Pi only: the `/srv/appdata` bind mount
+
+**Skip this on the mini PC.** There, `/srv/appdata` is an ordinary directory on
+the internal SSD and gets no fstab entry at all.
+
+The Pi has no internal disk, and every compose file names `/srv/appdata`. Left as
+an ordinary directory, that path is on the SD card — so the Plex library database
+and every app's SQLite file would sit on the one device §1 says must hold nothing
+but the OS. A **bind mount** fixes it by making an existing directory appear at a
+second path: `/srv/appdata` becomes another name for a folder on the archive
+drive, and the compose files work unchanged on both machines.
+
+Both directories must exist before the mount can work:
+
+```bash
+sudo mkdir -p /mnt/archive/appdata /srv/appdata
+```
+
+Then add this to `/etc/fstab`, **below** the `/mnt/archive` line:
+
+```fstab
+/mnt/archive/appdata  /srv/appdata  none  bind,nofail,x-systemd.requires-mounts-for=/mnt/archive  0  0
+```
+
+A bind line looks nothing like a normal one, so field by field:
+
+| Field | Value | Why |
+| --- | --- | --- |
+| source | `/mnt/archive/appdata` | the real directory, on the USB drive |
+| target | `/srv/appdata` | the second name it appears under |
+| type | `none` | a bind mount has no filesystem of its own |
+| options | `bind` | says this is a bind rather than a device |
+| | `nofail` | do not wedge boot if the drive is absent |
+| | `x-systemd.requires-mounts-for=/mnt/archive` | do not attempt it until the archive drive is actually mounted |
+| dump / pass | `0  0` | nothing to dump, nothing to fsck |
+
+**Order matters, twice.** `mount -a` walks the file top to bottom, and at boot
+systemd uses `requires-mounts-for` to know the dependency. Get either wrong and
+the bind is attempted while `/mnt/archive` is still empty — which succeeds, on the
+SD card, silently. Hence:
+
+```bash
+findmnt /srv/appdata     # must name the USB device, not the card
+```
+
+One trap: if `/srv/appdata` already contains files — from an earlier run of §7,
+say — mounting over it *hides* them rather than merging. Move them aside first, or
+they stay invisible until you unmount again.
 
 ```bash
 sudo umount /mnt/ssd /mnt/ssd2
