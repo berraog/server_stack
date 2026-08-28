@@ -65,13 +65,58 @@ Three disks, three jobs:
   movies/  tv/  ...    read-only; mirrors whichever active folders you move
 ```
 
-**Why downloads and library are separate directories.** Radarr and Sonarr do not
-leave a finished file where it landed; they *import* it into a library folder
-they name and organise. To avoid storing every file twice that import is a
-hardlink, which works only inside one filesystem — hence both trees under
-`/mnt/active` rather than one of them on the internal SSD. The torrent keeps
-seeding from `downloads/`, Plex reads the tidy names in `library/`, and the bytes
-exist once.
+**Why `downloads/` and `library/` both exist — nothing is duplicated.** On Linux a
+file is an *inode*: the data plus its metadata. A directory entry is just a
+*name* pointing at an inode, and a **hardlink** is a second name for the same
+one. There is no original and no copy — one set of blocks on disk, two ways to
+reach it, and `df` counts it once.
+
+That is what lets two consumers make incompatible demands on the same bytes:
+
+- **qBittorrent** must keep the file exactly as the torrent describes it —
+  original release name, original folder structure — or the torrent breaks and
+  seeding stops.
+- **Plex** wants `Some Film (2019)/Some Film (2019).mkv`, and wants none of the
+  sample clips, `.nfo` files and nested folders a release ships with.
+
+So one film is `downloads/movies/Some.Film.2019.1080p.WEB-DL.x264-GRP/` to the
+tracker and `library/movies/Some Film (2019)/` to Plex, and it occupies its size
+**once**.
+
+Three directories, three stages of the same file:
+
+| Directory | What is in it |
+| --- | --- |
+| `incomplete/` | partial data being written; not playable, not seeding yet |
+| `downloads/` | complete, original names — what qBittorrent seeds from |
+| `library/` | the same inodes under tidy names, organised by Radarr and Sonarr |
+
+Every transition is free because all three are one filesystem: completing is a
+rename from `incomplete/` into `downloads/`, and importing is a hardlink into
+`library/`. Neither copies a byte.
+
+**The two names resolve to one by themselves.** When a torrent has met its
+seeding requirement and qBittorrent removes it, the `downloads/` name is deleted,
+the inode's link count drops from two to one, and the file carries on living in
+`library/` untouched. No copying, no cleanup by hand, no moment where the disk
+holds it twice.
+
+**Does the final location matter for seeding? Yes — which is exactly why Radarr
+never moves the file.** qBittorrent seeds from the path it recorded; move the file
+and it reports missing data and stops. Radarr's *Use Hardlinks instead of Copy*
+(§8) is what leaves the original name in place. If it ever *cannot* hardlink —
+because the two trees ended up on different filesystems — it silently falls back
+to copying: seeding still works, but every film now genuinely occupies twice its
+size. A library growing about twice as fast as it should is the symptom, and §13
+has it.
+
+**One caveat on not minding about seeding.** TorrentDay is a private tracker, and
+private trackers generally enforce a ratio and hit-and-run rules, so dropping
+every torrent the moment it finishes is how accounts get disabled — check its own
+rules. Letting the old Pi-era torrents go (§15c) is harmless; they have had their
+run. Never seeding at all is a different decision, and the arrangement above is
+precisely what makes seeding cost nothing: the bytes Plex is serving are the same
+bytes you are seeding.
 
 **`books/` and `other/` are the manual half.** Radarr covers movies, Sonarr
 covers TV, and nothing here covers an occasional ebook or audiobook — so those
@@ -1067,7 +1112,7 @@ matte-vm's SQLite file are not.
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
 | `qBittorrent login failed` | temporary password rotated on restart | permanent password + subnet whitelist (§8) |
 | a download completes and Radarr never imports it | the download client and Radarr disagree about the path | both must mount `/mnt/active` as `/data` (§8); *Activity → Queue* names the path it tried |
-| imports copy instead of hardlinking, and the disk fills twice | `downloads/` and `library/` are on different filesystems | both live under `/mnt/active` (§1) |
+| imports copy instead of hardlinking, and the disk fills twice | `downloads/` and `library/` are on different filesystems, or *Use Hardlinks* is off | both live under `/mnt/active` (§1); confirm with `ls -l` showing link count 2 on an imported file |
 | Bazarr's library is empty | Radarr/Sonarr not connected, or connected with the wrong port | `radarr:7878`, `sonarr:8989` — bridge names, not `gluetun` (§8) |
 | Jellyseerr requests approve but nothing downloads | *Settings → Services* has no Radarr/Sonarr, or the wrong root folder | §8 |
 | `502`/`530` from a public hostname | cloudflared cannot resolve or reach the service | service name and **container** port; is it in the same project? |
