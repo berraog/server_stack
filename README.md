@@ -10,7 +10,8 @@ describes the machine and, through `compose.yaml`, assembles it.
 
 | Stack | Services | Reachable at |
 | --- | --- | --- |
-| media | gluetun (VPN), qBittorrent, Prowlarr, Plex, torrent-finder | `media.bjorngreen.se`, LAN ports |
+| media | gluetun (VPN), qBittorrent, Prowlarr, Plex | LAN ports |
+| automation | Radarr, Sonarr, Bazarr | LAN ports only — admin tools |
 | matte-vm | FastAPI + SQLite + PWA | its own Cloudflare hostname |
 | jellyseerr | request front-end for Plex | its own Cloudflare hostname |
 | kometa | Plex collections and posters | nothing — scheduled job, no UI |
@@ -46,22 +47,31 @@ Three disks, three jobs:
 
 /mnt/active/           USB SSD — everything torrents touch
   incomplete/          qBittorrent's default save path AND its incomplete path
-  movies/  tv/         video; a Plex library each
-  music/               a Plex Music library
-  books/               ebooks, magazines, audiobooks — Plex reads none of these
-  other/               software, games, and whatever could not be classified
+  downloads/movies/    qBittorrent's targets; torrents keep seeding from here
+  downloads/tv/
+  library/movies/      Radarr's and Sonarr's output; what Plex reads
+  library/tv/
+  books/               manual grabs — ebooks, audiobooks, magazines
+  other/               manual grabs — anything else
 
 /mnt/archive/          USB SSD — content moved off active once it fills
   movies/  tv/  ...    read-only; mirrors whichever active folders you move
 ```
 
-**One directory per qBittorrent category, and `other` means residual.** The
-finder classifies each release and routes it, so `other/` collects software,
-games and releases it could not place — not simply everything that is not video.
-§8 has the mapping. Inside `books/`, keep `audiobooks/`, `ebooks/` and
-`magazines/` as hand-filed subfolders if you want them apart: no indexer
-category separates them reliably enough to automate, and nothing on this box
-reads them yet anyway.
+**Why downloads and library are separate directories.** Radarr and Sonarr do not
+leave a finished file where it landed; they *import* it into a library folder
+they name and organise. To avoid storing every file twice that import is a
+hardlink, which works only inside one filesystem — hence both trees under
+`/mnt/active` rather than one of them on the internal SSD. The torrent keeps
+seeding from `downloads/`, Plex reads the tidy names in `library/`, and the bytes
+exist once.
+
+**`books/` and `other/` are the manual half.** Radarr covers movies, Sonarr
+covers TV, and nothing here covers an occasional ebook or audiobook — so those
+are grabbed by hand from Prowlarr's own Search tab (§8) into their own
+qBittorrent categories. Inside `books/`, keep `audiobooks/`, `ebooks/` and
+`magazines/` as subfolders if you want them apart. Nothing on this box reads
+them; that would be Calibre-web or Audiobookshelf, added per §10.
 
 **Why state is internal and media is not.** Plex's library is a SQLite database
 bound by random writes, so its location is the one you can actually feel; media
@@ -72,9 +82,8 @@ SSDs, so the mountpoints name each disk's *job* rather than its bus.
 mount — `/mnt/active` as `/data` — so `incomplete/`, `movies/`, `tv/` and
 `other/` are unavoidably on one filesystem. Completing a torrent is then a
 rename instead of a copy, and it cannot regress into a copy later by someone
-pointing one category at the other disk. The finder's free-space guard reads
-qBittorrent's *default* save path, which is on this disk too, so
-`MIN_FREE_SPACE_GB` guards the disk that actually fills.
+pointing one category at the other disk — and the same one filesystem is what
+lets Radarr and Sonarr import by hardlink instead of copying (§8).
 
 That last point is why downloads stay on a USB drive rather than following the
 rest of the state onto the fast internal SSD: put `incomplete/` there and every
@@ -196,7 +205,8 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
 ~/stack/                          THIS repo — how the machine fits together
   README.md                       this file
   compose.yaml                    include: list + cloudflared
-  media/compose.yaml              gluetun, qbittorrent, prowlarr, plex, finder
+  media/compose.yaml              gluetun, qbittorrent, prowlarr, plex
+  media/arr.yaml                  radarr, sonarr, bazarr
   apps/matte-vm.yaml              one fragment per standalone app
   apps/jellyseerr.yaml            third-party image, same shape
   apps/kometa.yaml                scheduled job: no port, no hostname
@@ -208,7 +218,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
   .env.example                    same keys, no values, committed
   .gitignore
 ~/git/matte-vm/                   app repo: Dockerfile + its own compose file
-~/git/torrent_finder/             app repo: Dockerfile + app/
+~/git/torrent_finder/             retired from the stack (§8), repo kept
 ~/git/<next-app>/                 same shape
 /srv/appdata/<service>/           container state, internal SSD (§1)
 /mnt/active/, /mnt/archive/       bulk media, USB drives (§1)
@@ -220,7 +230,8 @@ in isolation, while `~/stack` composes them into the real machine.
 
 **The stack does not read those app compose files.** Each app gets a fragment
 here that only `build:`s from `~/git/<app>`. That is the pattern `media/` already
-used for the finder, generalised — because an included app file must not define
+used for `finder` before it was retired, generalised — because an included app
+file must not define
 `cloudflared`, must not set `networks:`, and must not collide on a host port,
 and an app repo that predates those rules breaks the whole assembly:
 
@@ -292,8 +303,10 @@ allocated" surprise when adding an app.
 | 6881 (tcp/udp) | torrent traffic | published by **gluetun** |
 | 9696 | Prowlarr | published by **gluetun** |
 | 8000 | matte-vm `app` | taken — do not reuse |
-| 8010 | torrent-finder | container side is 8000 |
 | 8090 | frontend (nginx) | container side is 80 |
+| 7878 | Radarr | LAN only, never tunnelled |
+| 8989 | Sonarr | LAN only, never tunnelled |
+| 6767 | Bazarr | LAN only, never tunnelled |
 | 5055 | Jellyseerr | its own default |
 | 32400 | Plex | `network_mode: host` |
 
@@ -308,6 +321,11 @@ none either — it never listens.
 
 - `http://qbittorrent:8080` never resolves. Use **`http://gluetun:8080`**.
 - `http://prowlarr:9696` never resolves. Use **`http://gluetun:9696`**.
+- That applies to every app configured to reach them, which is now most of the
+  box: Radarr and Sonarr point their download client and indexer proxy at
+  `gluetun`, and so does Prowlarr's own download client. Radarr, Sonarr and
+  Bazarr are ordinary bridge services themselves, so *their* names do resolve —
+  `http://radarr:7878` from Bazarr or Jellyseerr is correct.
 - Neither service may have a `ports:` block — publishing a port on a container
   that borrows another's namespace fails with *"conflicting options: port
   publishing and the container type network mode"*. All their ports go on
@@ -338,17 +356,16 @@ is the one file that cannot be reconstructed from the repos.
 
 | Setting | Checked by | Supplied by |
 | --- | --- | --- |
-| `UI_USERNAME`/`UI_PASSWORD` | torrent-finder, on every request | your browser |
-| `QBITTORRENT_*` | qBittorrent's API | torrent-finder, server-side |
-| `PROWLARR_API_KEY` | Prowlarr | torrent-finder, server-side |
 | `NORDVPN_SERVICE_*` | NordVPN | gluetun |
+| `CLOUDFLARE_TUNNEL_TOKEN` | Cloudflare | cloudflared |
+| qBittorrent's WebUI login | qBittorrent's API | Radarr, Sonarr and Prowlarr, each in its own UI |
+| Prowlarr's / Radarr's / Sonarr's API keys | each other | entered in each app's UI, never in `.env` |
 
 ## 7. First-time setup, in order
 
 ```bash
 # 1. clone
 mkdir -p ~/git && cd ~/git
-git clone git@github.com:<you>/torrent_finder.git
 git clone git@github.com:<you>/matte-vm.git
 cd ~ && git clone git@github.com:<you>/stack.git       # this repo
 
@@ -357,9 +374,10 @@ cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.
 
 # 3. data directories, owned by the container user
 #    internal SSD: container state.  USB drives: bulk media only.
-sudo mkdir -p /srv/appdata/{gluetun,qbittorrent,prowlarr,plex/config,plex/transcode,matte-vm}
-sudo mkdir -p /mnt/active/{incomplete,movies,tv,music,books,other} \
-              /mnt/active/books/{audiobooks,ebooks,magazines} \
+sudo mkdir -p /srv/appdata/{gluetun,qbittorrent,prowlarr,plex/config,plex/transcode}
+sudo mkdir -p /srv/appdata/{radarr,sonarr,bazarr,jellyseerr,kometa,matte-vm}
+sudo mkdir -p /mnt/active/{incomplete,downloads/{movies,tv},library/{movies,tv}} \
+              /mnt/active/{books/{audiobooks,ebooks,magazines},other} \
               /mnt/archive/{movies,tv}
 sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
 
@@ -392,7 +410,7 @@ docker compose exec prowlarr curl -s ifconfig.me      # must match qBittorrent
 ### qBittorrent (`http://<host>:8080`)
 
 linuxserver's image prints a **new temporary password on every start** until a
-permanent one is set, which would break the finder on each reboot.
+permanent one is set, which would break Radarr and Sonarr on each reboot.
 
 ```bash
 docker compose logs qbittorrent | grep -i "temporary password"
@@ -402,38 +420,36 @@ docker compose logs qbittorrent | grep -i "temporary password"
    it in `QBITTORRENT_PASSWORD`.
 2. Same page: tick **Bypass authentication for clients in whitelisted IP
    subnets** → `172.16.0.0/12`. Docker bridge networks live in that range, so
-   the finder authenticates regardless of password changes. The WebUI is inside
-   gluetun's namespace and not internet-reachable either way.
+   Radarr, Sonarr and Prowlarr authenticate regardless of password changes. The
+   WebUI is inside gluetun's namespace and not internet-reachable either way.
 3. *Options → Downloads*:
    - **Default Save Path**: `/data/incomplete`
    - **Keep incomplete torrents in**: `/data/incomplete`
-4. *Categories* (right-click the sidebar → Add category):
+4. *Categories*. Radarr and Sonarr create and own theirs on first contact — do
+   not make them by hand. You only create the two manual ones (right-click the
+   sidebar → Add category):
 
-   | Category | Save path | Host path | Plex sees | Routed when the finder says |
-   | --- | --- | --- | --- | --- |
-   | `movies` | `/data/movies` | `/mnt/active/movies` | `/active/movies` | `movie` |
-   | `tv` | `/data/tv` | `/mnt/active/tv` | `/active/tv` | `tv` |
-   | `music` | `/data/music` | `/mnt/active/music` | `/active/music` | `music` |
-   | `books` | `/data/books` | `/mnt/active/books` | *(no library)* | `book` |
-   | `other` | `/data/other` | `/mnt/active/other` | *(no library)* | anything else |
+   | Category | Save path | Owned by |
+   | --- | --- | --- |
+   | `radarr` | `/data/downloads/movies` | Radarr, created automatically |
+   | `sonarr` | `/data/downloads/tv` | Sonarr, created automatically |
+   | `books` | `/data/books` | you, for manual Prowlarr grabs |
+   | `other` | `/data/other` | you, for manual Prowlarr grabs |
 
-   The last column is `app/classify.py` in the finder, which resolves a release
-   to one of `movie`, `tv`, `music`, `book`, `software`, `game`, `xxx` or
-   `other` from the indexer's category ids and the release name. Only the first
-   four get a category of their own; software, games, xxx and the unplaceable
-   share `other`, which is what keeps it a residual rather than a second
-   library. Audiobooks route to `books` — newznab files them under Audio
-   (3030) and TorrentDay calls them "Audio Books", and the finder overrides
-   both, because an audiobook belongs with the books.
-
-   The finder creates any that are missing. If you set them here instead, drop
-   the `*_SAVE_PATH` variables and it follows whatever qBittorrent says.
+   Note that only the manual categories save into their final home. Radarr's and
+   Sonarr's land in `downloads/`, and the file reaches `library/` when the *arr
+   app imports it — which is the whole point of the split (§1).
 
 Every path above is under the single `/data` mount, which is the whole active
-disk (§1). That is what makes completion a rename rather than a copy, and it is
-why `incomplete/` is a sibling of the library folders instead of living inside
-one: incomplete files inside a Plex library get scanned half-written and pollute
-it.
+disk (§1). That is what makes completion a rename and an import a hardlink, and
+it is why `incomplete/` is a sibling rather than living inside a library folder:
+incomplete files inside a Plex library get scanned half-written and pollute it.
+
+**`/data` must be spelled identically everywhere.** qBittorrent, Radarr, Sonarr
+and Bazarr all mount `/mnt/active` at `/data` for one reason: qBittorrent reports
+a finished torrent's location as a path, and Radarr has to open that exact path
+to import it. Mount it as `/downloads` in one and `/data` in another and imports
+simply never happen, with no error that names the cause (§13).
 
 **Lost the password entirely:** stop the container first (qBittorrent rewrites
 its config on exit), then either clear the hash to get a fresh temporary
@@ -451,36 +467,76 @@ docker compose logs qbittorrent | grep -i "temporary password"
 
 ### Prowlarr (`http://<host>:9696`)
 
-1. *Settings → General → Security*: copy the API key into `PROWLARR_API_KEY`.
+Prowlarr is the indexer proxy: it holds the TorrentDay credentials once, and
+pushes the indexer definition out to Radarr and Sonarr so they never hold it.
+
+1. *Settings → General → Security*: note the API key. Radarr, Sonarr and
+   Jellyseerr each need it, entered in their own UIs.
 2. *Indexers → Add Indexer → TorrentDay*, authenticate with your account cookie.
 3. Run one search from Prowlarr's own *Search* tab before trusting it from code.
-4. Recreate the finder so it picks up the key: `docker compose up -d finder`.
+4. *Settings → Apps → Add → Radarr*, then again for *Sonarr*. Server addresses
+   are `http://radarr:7878` and `http://sonarr:8989`; the Prowlarr server address
+   it asks for in return is `http://gluetun:9696`, **not** `http://prowlarr:9696`
+   (§5). Indexers then sync outward automatically.
+5. *Settings → Download Clients → Add → qBittorrent*, host `gluetun`, port
+   `8080`. This is what makes step 3's *Search* tab able to grab, which is how
+   the occasional ebook or audiobook gets downloaded now — set the category to
+   `books` or `other` on the grab.
 
-### torrent-finder (`http://<host>:8010`, `media.bjorngreen.se`)
+That last step is the whole manual workflow. Prowlarr's search is not as pleasant
+as a purpose-built UI, but it is already here, already authenticated, and already
+inside the VPN namespace, and the alternative was maintaining an app for
+something that happens a few times a year.
 
-Nothing to configure in a UI; everything is environment. Confirm the routing
-resolved against the real qBittorrent:
+### Radarr (`http://<host>:7878`) and Sonarr (`http://<host>:8989`)
 
-```bash
-docker compose logs finder | grep 'qBittorrent category'
-# movie -> qBittorrent category 'movies' at /data/movies
-# tv    -> qBittorrent category 'tv' at /data/tv
-# music -> qBittorrent category 'music' at /data/music
-# book  -> qBittorrent category 'books' at /data/books
-# other -> qBittorrent category 'other' at /data/other
-```
+Identical setup; do both. Neither is on the tunnel — they can rewrite your
+library, so they stay on the LAN (§9).
 
-Routing itself is covered by a test in the finder's repo, which needs no running
-services:
+1. *Settings → Media Management → Root Folders → Add*:
+   `/data/library/movies` for Radarr, `/data/library/tv` for Sonarr.
+2. *Settings → Media Management*: turn on **Rename Movies** / **Rename
+   Episodes**, and leave **Use Hardlinks instead of Copy** on. If it ever copies
+   instead, `/data` is two filesystems and §1 has been violated.
+3. *Settings → Download Clients → Add → qBittorrent*: host `gluetun`, port
+   `8080`, the WebUI login from §8. Leave *Category* at `radarr` / `sonarr` — it
+   creates them in qBittorrent for you.
+4. *Settings → Indexers*: already populated by Prowlarr (§8). If empty, step 4
+   of Prowlarr did not take.
+5. *Settings → Profiles → Quality Profiles*: this is where the buffering fix
+   from §8's release guidance stops being a habit. Build a profile that allows
+   1080p WEB-DL and Bluray, rejects Remux and 2160p, and it will never again
+   grab a file that forces a burn-in transcode.
+6. *Settings → Profiles → Quality Definitions*: set the maximum sizes. This
+   replaces the `MAX_TORRENT_SIZE_GB` guard the finder used to enforce.
 
-```bash
-cd ~/git/torrent_finder && uv run python test_routing.py
-```
+**One guard did not survive the move.** The finder refused a download when free
+space fell below `MIN_FREE_SPACE_GB`, measured on the download disk. Radarr and
+Sonarr have a *Minimum Free Space* under *Media Management* (advanced), but it
+defaults to a value far below 20 GB and only blocks the import, not the download.
+Set it, and keep `df -h /mnt/active` in your routine (§12) — automation fills a
+disk considerably faster than choosing releases by hand did.
 
-`/downloads/movies` in that output means the `*_SAVE_PATH` variables never
-reached the container. Search behaviour: an empty search box browses the ticked
-categories instead of matching a name. Deleting from the downloads drawer
-deletes the files, which for a finished torrent is the copy Plex is serving.
+### Bazarr (`http://<host>:6767`)
+
+Bazarr has no library of its own: it asks Radarr and Sonarr what exists and
+where, which is why it could not run here until now.
+
+1. *Settings → Radarr*: address `radarr`, port `7878`, Radarr's API key. Same
+   for *Settings → Sonarr* with `sonarr` and `8989`. These are bridge services,
+   so their own names resolve — no `gluetun` here (§5).
+2. *Settings → Languages*: define a profile (say Swedish, then English) and set
+   it as default for both series and movies.
+3. *Settings → Providers*: add OpenSubtitles or similar. An account is free and
+   the anonymous limits are low enough to look broken.
+4. *Settings → Subtitles*: leave **Use embedded subtitles** on so it does not
+   fetch what a file already carries as text.
+
+Once this works, turn Plex's own subtitle agent back off — two things fetching
+subtitles for the same file produce duplicates that are tedious to unpick. Bazarr
+writing `.srt` files next to the video is also strictly better for the burn-in
+problem than an embedded PGS: a sidecar SRT is text, so clients render it and
+nothing transcodes (§8).
 
 ### Plex (`http://<host>:32400/web`)
 
@@ -490,18 +546,21 @@ remove it again. Two libraries, each spanning both disks:
 
 | Library | Type | Folders |
 | --- | --- | --- |
-| Movies | Movies | `/active/movies`, `/archive/movies` |
-| TV Shows | TV Shows | `/active/tv`, `/archive/tv` |
-| Music | Music | `/active/music`, `/archive/music` |
+| Movies | Movies | `/data/library/movies`, `/archive/movies` |
+| TV Shows | TV Shows | `/data/library/tv`, `/archive/tv` |
+
+Point Plex at `library/`, never at `downloads/`. Files in `downloads/` are
+mid-import, wrongly named, and often duplicates of what is already in the
+library — exactly the pollution the incomplete directory was kept out of.
 
 Both mounts are read-only, so Plex's own *delete media* does nothing. Deleting
-is the finder's job, via qBittorrent, which holds `/data` read-write.
+is Radarr's and Sonarr's job, and they hold `/data` read-write.
 
-`books/` and `other/` are deliberately outside every library. Plex dropped ebook
-support years ago, so reading what lands in `books/` needs a different app —
-Kavita or Calibre-web for ebooks and magazines, Audiobookshelf for audiobooks.
-Adding one is §10, and it would mount `/mnt/active/books` read-only; nothing
-about the layout has to change first.
+`books/`, `other/` and `downloads/` are deliberately outside every library. Plex
+dropped ebook support years ago, so reading what lands in `books/` needs a
+different app — Calibre-web or Kavita for ebooks and magazines, Audiobookshelf
+for audiobooks. Adding one is §10, and it would mount `/mnt/active/books`
+read-only; nothing about the layout has to change first.
 
 **What to prefer when picking a release.** Hardware transcoding removes most of
 the reason to care about format. Two things it does not fix:
@@ -579,23 +638,21 @@ Then in the setup wizard: choose **Plex**, and for the server address use
 Sign in with your Plex account, import the Movies and TV libraries, and set
 *Settings → General → Application URL* to `https://requests.bjorngreen.se`.
 
-**What it cannot do here.** Jellyseerr fulfils an approved request by handing it
-to Sonarr or Radarr, and this box runs neither. *Settings → Services* will be
-empty and approved requests stay pending forever, because nothing downstream is
-listening. What still works, and is most of the value:
+Then wire the fulfilment, which is what makes it more than an inbox —
+*Settings → Services → Add Radarr Server*, and again for Sonarr:
 
-- a browsable TMDB catalogue with per-user accounts via Plex sign-in
-- requests, approvals and notifications, so asks arrive somewhere instead of in
-  a chat message you lose
-- **automatic availability** — Jellyseerr watches the Plex libraries it imported
-  and flips a request to *Available* once the file has been scanned in
+| Field | Value |
+| --- | --- |
+| Hostname | `radarr` / `sonarr` — bridge services, so the names resolve (§5) |
+| Port | `7878` / `8989` |
+| API key | from that app's *Settings → General* |
+| Quality profile | the 1080p profile from §8, so requests inherit the format policy |
+| Root folder | `/data/library/movies` / `/data/library/tv` |
 
-So the loop closes on its own; only the middle step is manual. A request comes
-in, you search it in torrent-finder, and Jellyseerr notices when Plex does.
-
-Making it fully automatic is a decision rather than a config change — see *The
-Sonarr/Radarr question* below. Neither route is required to start using it as an
-inbox, and neither is foreclosed by doing so.
+A request now goes: someone asks → you approve (or auto-approve trusted users) →
+Radarr searches Prowlarr → qBittorrent downloads through the VPN → Radarr imports
+and renames into `library/` → Plex scans → Jellyseerr marks it *Available*. No
+step in that chain is yours once the profile is right.
 
 ### Kometa (no UI — `docker compose logs kometa`)
 
@@ -635,91 +692,25 @@ Nothing here is on a hostname or a port. If Kometa appears to do nothing, it is
 almost always the schedule: `KOMETA_TIME` and the container's timezone decide
 when it wakes, and the logs say what it did.
 
-### Bazarr — not usable on this box
+### Retired: torrent-finder
 
-Bazarr manages subtitles, and it is worth wanting. It cannot run here yet, and
-this is a hard dependency rather than a configuration gap: **Bazarr has no
-library of its own.** It does not scan directories; it asks Sonarr and Radarr for
-the list of movies and series and their paths, then fetches subtitles for those.
-With neither installed, its first-run wizard has nothing to connect to and the
-library stays empty. Adding the container would give you a working web UI that
-knows about no media at all.
+Removed from the stack. It was a manual search-and-grab front-end, and once
+Radarr and Sonarr own release selection through quality profiles the only job
+left was the occasional ebook — which Prowlarr's own *Search* tab does (§8),
+without an internet-facing login to maintain for something that happens a few
+times a year.
 
-The immediate need it would serve is already covered from a different direction:
-the subtitle guidance above has Plex fetching SRTs through its own subtitle
-agent, which is what keeps image subtitles from being the only option and stops
-the burn-in transcodes. Bazarr does that job considerably better — more
-providers, scoring, per-language rules, upgrades over time — but "considerably
-better" is the gap here, not "possible versus impossible".
+The repo is untouched at `~/git/torrent_finder` and still runs standalone
+(`docker compose up` in it), so nothing is lost if this turns out to be wrong.
+What went away with it, deliberately:
 
-### The Sonarr/Radarr question
-
-Three things now want these, so it is worth deciding once rather than per app:
-
-| Wants it | For what | Without it |
-| --- | --- | --- |
-| Jellyseerr | fulfilling an approved request | works as a request inbox; you grab it by hand |
-| Bazarr | knowing what media exists at all | does not work |
-| Kometa | optional list sources only | fully functional |
-
-The cost is not the two containers. It is that Sonarr and Radarr expect to own
-the download pipeline end to end: they pick releases, set qBittorrent categories
-and save paths, and rename and move finished files into a folder structure they
-maintain. That is very nearly the entire job `torrent-finder` does, and both
-would be writing the same qBittorrent categories — the finder's
-`MANAGE_CATEGORIES` and Radarr's category settings fighting over `movies`. So
-this is not "add two apps", it is **choosing which one routes downloads**:
-
-- **Keep torrent-finder as the router.** Jellyseerr stays an inbox, Bazarr stays
-  off the box, and searching stays a deliberate act you perform. Nothing changes.
-- **Hand routing to Sonarr/Radarr.** Set `MANAGE_CATEGORIES=false` so the finder
-  stops competing, and let it become a manual search tool beside them rather
-  than the thing that files downloads. The *arr apps then own §8's category
-  table, and the §1 layout has to survive their renaming rules — they are
-  happiest with one root per library type, which `/mnt/active/{movies,tv}`
-  already is.
-- **Bridge them.** Jellyseerr can POST an approved request to a webhook, and the
-  finder already searches Prowlarr and pushes to qBittorrent; only the
-  choose-a-release step is missing. Keeps one router and one folder scheme, at
-  the cost of writing it.
-
-**The layout consequence, which is easy to miss.** Today qBittorrent saves a
-finished torrent straight into the folder Plex reads, and that is why §1 is as
-simple as it is. Sonarr and Radarr do not work that way: they *import* from the
-download folder into a library folder they name and organise themselves, and to
-avoid storing every file twice that import is a hardlink — which only works if
-both trees are on the same filesystem. So handing video to the *arr apps means
-splitting `/mnt/active` one level deeper:
-
-```
-/mnt/active/
-  incomplete/
-  downloads/movies/  downloads/tv/    qBittorrent's targets; keeps seeding
-  library/movies/    library/tv/      Radarr/Sonarr's output; what Plex reads
-  music/  books/  other/              unchanged — no *arr app owns these
-```
-
-One filesystem still, so hardlinks work and nothing is copied; but Plex's library
-folders move to `library/`, and `music/`/`books/`/`other/` stay exactly as they
-are. Worth knowing before starting, not after.
-
-**What is actually recommended.** Keep `torrent-finder` and narrow it, because
-the split we already have maps onto the division cleanly: Sonarr covers TV,
-Radarr covers movies, and **neither covers anything else** — Lidarr exists for
-music, the books equivalent was retired, and nothing automates magazines,
-software or a one-off grab. That is precisely `music/`, `books/` and `other/`.
-
-So: let the *arr apps own `movies` and `tv`, set `MANAGE_CATEGORIES=false` so the
-finder stops rewriting categories they own, and keep the finder as the manual
-tool for the long tail it is already good at. Deleting it would leave that tail
-with nothing.
-
-The one case for genuinely retiring it is if video is all you ever download. Then
-its movie/TV routing is the whole app, quality profiles do the release-picking
-better than reading badges by hand (§8), and keeping it around is a half-used
-service with an internet-facing login. Be honest about which of those you are.
-
-Nothing here needs deciding today.
+| Gone | Replaced by |
+| --- | --- |
+| picking releases by reading quality badges | Radarr/Sonarr quality profiles (§8) |
+| `MAX_TORRENT_SIZE_GB` | Quality Definitions maximum sizes |
+| `MIN_FREE_SPACE_GB` | *Minimum Free Space* plus `df` — a real downgrade, see §8 |
+| `movies`/`tv`/`music`/`books`/`other` category routing | `radarr`/`sonarr` automatic, `books`/`other` manual |
+| a request-shaped UI reachable from anywhere | Jellyseerr, which is what it should have been |
 
 ## 9. Cloudflare
 
@@ -730,9 +721,14 @@ tunnel is **remotely managed**, so a local `config.yml` is ignored.
 
 | Subdomain | Domain | Path | Type | URL |
 | --- | --- | --- | --- | --- |
-| `media` | `bjorngreen.se` | *(empty)* | HTTP | `torrent-finder:8000` |
 | (matte) | `bjorngreen.se` | *(empty)* | HTTP | `app:8000` |
 | `requests` | `bjorngreen.se` | *(empty)* | HTTP | `jellyseerr:5055` |
+
+**Radarr, Sonarr, Bazarr and qBittorrent get no hostname, on purpose.** They can
+rewrite or delete your library and they hold tracker credentials, and Jellyseerr
+already covers the only thing anyone needs to do remotely. Reach them on the LAN
+or through whatever you already use to reach the box's shell. If `media.` still
+points at the retired finder, delete that hostname and its Access application.
 
 The URL is `<service name>:<container port>` — the container port, not the host
 port, because cloudflared talks over the shared docker network. Leave **Path**
@@ -742,10 +738,9 @@ else.
 
 **Then put Access in front of anything that can act on your box.** *Zero Trust →
 Access → Applications → Add a self-hosted application*, hostname
-`media.bjorngreen.se`, policy **Allow → Emails → your address** (one-time PIN
-needs no extra setup). The finder can download to your disk and delete from your
-Plex library, so it gets Access *and* its own Basic auth. Two prompts in the
-browser is both locks working, not a bug.
+`requests.bjorngreen.se`, policy **Allow → Emails → your address** (one-time PIN
+needs no extra setup) — but read the Jellyseerr caveat below before applying it,
+because it is the one hostname where Access may be the wrong call.
 
 **Jellyseerr is the one case where Access may be wrong.** It signs people in with
 Plex OAuth, so it already has real per-user auth, and it exists for other people
@@ -757,7 +752,7 @@ than a request. Set *Settings → General → Application URL* to the public
 hostname either way, or Plex's OAuth redirect and the notification links break.
 
 ```bash
-curl -sI https://media.bjorngreen.se | head -1
+curl -sI https://requests.bjorngreen.se | head -1
 # 401 = the app answered and refused for lack of credentials (healthy)
 # 502/530 = cloudflared could not reach the service — name or port wrong
 # Cloudflare login page = Access is in front (expected once §9 is done)
@@ -893,7 +888,7 @@ journalctl -u autodeploy -f            # watch a deploy happen
 
 Three details that matter more than they look:
 
-- **`--no-deps <service>`** — without it a finder rebuild can recreate gluetun,
+- **`--no-deps <service>`** — without it a rebuild can recreate gluetun,
   which restarts qBittorrent and Prowlarr and interrupts every active torrent.
 - **`config -q` before `up`** — the guard that makes one big project safe. A bad
   push fails the check and the running stack is left alone.
@@ -913,14 +908,14 @@ up the hardware overlay (§3).
 cd ~/stack
 
 # one app, after a push (what autodeploy does)
-docker compose up -d --build --no-deps finder
+docker compose up -d --build --no-deps app
 
 # infrastructure change (edited compose.yaml or .env)
 git pull && docker compose config -q && docker compose up -d
 
 # base image updates — media stack only, on purpose
-docker compose pull qbittorrent prowlarr plex cloudflared
-docker compose up -d qbittorrent prowlarr plex cloudflared
+docker compose pull qbittorrent prowlarr radarr sonarr bazarr plex cloudflared
+docker compose up -d qbittorrent prowlarr radarr sonarr bazarr plex cloudflared
 docker image prune -f
 
 # gluetun / VPN change: recreates its tenants, interrupts torrents
@@ -928,7 +923,7 @@ docker compose pull gluetun && docker compose up -d gluetun
 
 # state
 docker compose ps
-docker compose logs -f --tail=100 finder
+docker compose logs -f --tail=100 radarr
 df -h / /mnt/active /mnt/archive
 docker system df
 ```
@@ -939,7 +934,8 @@ Restart blast radius, worth internalising:
 | --- | --- |
 | `gluetun` | qBittorrent, Prowlarr (namespace tenants) |
 | `cloudflared` | every public hostname, ~10s |
-| `qbittorrent`, `prowlarr`, `finder`, an app | only itself |
+| `qbittorrent`, `prowlarr` | only itself |
+| `radarr`, `sonarr`, `bazarr`, an app | only itself |
 
 **Rollback** an app: `git -C ~/git/<app> checkout <good-sha>` then
 `docker compose up -d --build --no-deps <service>`. Autodeploy will pull it
@@ -976,8 +972,12 @@ matte-vm's SQLite file are not.
 | every container restarted overnight | `unattended-upgrades` updated docker-ce | `apt-mark hold` the docker packages (§2) |
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
-| finder: `Cannot reach qBittorrent at http://qbittorrent:8080` | namespace tenants have no DNS name | use `http://gluetun:8080` |
-| finder: `qBittorrent login failed` | temporary password rotated on restart | permanent password + subnet whitelist (§8) |
+| Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
+| `qBittorrent login failed` | temporary password rotated on restart | permanent password + subnet whitelist (§8) |
+| a download completes and Radarr never imports it | the download client and Radarr disagree about the path | both must mount `/mnt/active` as `/data` (§8); *Activity → Queue* names the path it tried |
+| imports copy instead of hardlinking, and the disk fills twice | `downloads/` and `library/` are on different filesystems | both live under `/mnt/active` (§1) |
+| Bazarr's library is empty | Radarr/Sonarr not connected, or connected with the wrong port | `radarr:7878`, `sonarr:8989` — bridge names, not `gluetun` (§8) |
+| Jellyseerr requests approve but nothing downloads | *Settings → Services* has no Radarr/Sonarr, or the wrong root folder | §8 |
 | `502`/`530` from a public hostname | cloudflared cannot resolve or reach the service | service name and **container** port; is it in the same project? |
 | Cloudflare hostname 404s all assets | a Path prefix was set | leave Path empty, use a subdomain |
 | `docker compose exec qbittorrent curl ifconfig.me` shows the ISP IP | namespace sharing not in effect | check `network_mode`, recreate |
@@ -985,10 +985,10 @@ matte-vm's SQLite file are not.
 | that same command hangs | gluetun killswitch, usually DNS | `docker compose logs gluetun` |
 | Plex shows half-finished files | downloading straight into a library | set the incomplete path (§8) |
 | finished torrents take minutes to "move" | a category path escaped the `/data` mount | every category lives under `/data`, one disk (§1, §8) |
-| Plex cannot delete a file | `/active` and `/archive` are mounted read-only | intended; delete through the finder (§8) |
+| Plex cannot delete a file | `/data` and `/archive` are mounted read-only | intended; delete through Radarr or Sonarr (§8) |
 | moved a folder to archive and seeding stopped | qBittorrent only mounts `/mnt/active` | expected — the trade described in §1 |
-| finder refuses a download for low space | free-space guard reading the wrong disk | default save path must be on ssd2 (§8) |
-| finder container exits at start | a `${VAR:?...}` has no value | fill it in `~/stack/.env` |
+| the active disk filled up with no warning | the finder's free-space guard is gone | *Minimum Free Space* in Media Management, plus `df` in your routine (§8) |
+| a container exits at start | a `${VAR:?...}` has no value | fill it in `~/stack/.env` |
 | disk full, no obvious cause | old build layers | `docker image prune -f`, `docker system df` |
 
 ## 14. Security posture
@@ -996,8 +996,9 @@ matte-vm's SQLite file are not.
 - Nothing but Cloudflare is exposed: no router ports are forwarded, and the
   tunnel is outbound-only.
 - Public apps get **two** locks: a Cloudflare Access policy and the app's own
-  auth. The finder in particular can download to disk and delete from the Plex
-  library, so keep `UI_PASSWORD` long, random and unique.
+  auth. Radarr, Sonarr, Bazarr and qBittorrent can all rewrite or delete the
+  library, which is exactly why none of them has a hostname (§9) — the tunnel
+  carries Jellyseerr and matte-vm only.
 - qBittorrent's WebUI is inside the VPN namespace and reachable only on the LAN.
 - Secrets live in `~/stack/.env` (0600, gitignored). They are still visible to
   `docker inspect` and `docker compose config` — that is a local-access
@@ -1010,7 +1011,8 @@ matte-vm's SQLite file are not.
   if you `apt-mark hold` the docker packages to stop surprise restarts (§2),
   updating them stays your job.
 - Rotate anything that has ever been pasted into a chat, an issue or a paste
-  site: NordVPN service credentials, the tunnel token, `UI_PASSWORD`.
+  site: NordVPN service credentials, the tunnel token, and any of the app API
+  keys — Prowlarr's in particular, since it fronts the tracker account.
 
 ## 15. Migrating an existing setup
 
@@ -1046,13 +1048,19 @@ Point the mountpoints at their new roles in `/etc/fstab` (§1), remount, then:
 ```bash
 cd ~/stack && docker compose down
 
-# active  = the old /mnt/ssd2: already has incomplete/ and the torrent folders
-mv /mnt/active/share/torrents/movies      /mnt/active/movies
-mv /mnt/active/share/torrents/tv          /mnt/active/tv
+# active = the old /mnt/ssd2. Its finished torrent folders become downloads/,
+# because that is where torrents seed from; Radarr and Sonarr will hardlink
+# them into library/ in 15c, which costs no space.
+mkdir -p /mnt/active/downloads /mnt/active/library
+mv /mnt/active/share/torrents/movies      /mnt/active/downloads/movies
+mv /mnt/active/share/torrents/tv          /mnt/active/downloads/tv
 mv /mnt/active/share/torrents/incomplete  /mnt/active/incomplete
 rmdir /mnt/active/share/torrents /mnt/active/share
+mkdir -p /mnt/active/library/{movies,tv} \
+         /mnt/active/books/{audiobooks,ebooks,magazines} /mnt/active/other
 
-# archive = the old /mnt/ssd: the hand-managed library
+# archive = the old /mnt/ssd: the hand-managed library, which no *arr app
+# manages. Plex reads it directly and it stays as it is.
 mv /mnt/archive/media/movies  /mnt/archive/movies
 mv /mnt/archive/media/tv      /mnt/archive/tv
 
@@ -1064,7 +1072,6 @@ mv /mnt/active/plex/config          /srv/appdata/plex/config
 cp -r ~/git/matte-vm/data/.         /srv/appdata/matte-vm/
 
 # the one real copy: `other` was on the wrong disk (see below)
-mkdir -p /mnt/active/{music,books/{audiobooks,ebooks,magazines}}
 mv /mnt/archive/media/other/* /mnt/active/other/ && rmdir /mnt/archive/media/other
 sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
 ```
@@ -1076,34 +1083,46 @@ completed `other` download was already being copied between disks — the exact
 thing §1 forbids, on the one category nobody watches. Under `/data` it cannot
 happen again.
 
-Whatever is already in `other/` predates the split, so sort it into `music/` and
-`books/` by hand once — there is nothing to infer it from after the fact. New
-downloads route themselves (§8), and anything left behind stays readable where
-it is.
+Whatever is already in `other/` predates the split, so sort anything you want
+into `books/` by hand once; the rest can stay where it is.
 
-### 15c. Repointing qBittorrent's existing torrents
+### 15c. Handing the existing library to Radarr and Sonarr
 
-The container-side paths changed (`/auto_movies` → `/data/movies`), so running
-torrents will report missing files until they are told where the data went.
-qBittorrent has no bulk rewrite, but per-category is close enough:
+Two things need saying: qBittorrent's container paths changed, and Radarr and
+Sonarr have never seen any of this content.
+
+**qBittorrent first.** Running torrents will report missing files until they are
+told where the data went (`/auto_movies` → `/data/downloads/movies`). There is no
+bulk rewrite, but per-category is close enough:
 
 1. Start the stack, open the WebUI, click a category in the sidebar.
 2. Select all (Ctrl-A) → right-click → **Set location** → the new path.
 3. It rechecks — fast, since the files are present and unmoved.
 
-Repeat for each category. If you would rather not touch the session at all, add
-compatibility mounts to `media/compose.yaml` so both path spellings resolve,
-migrate at leisure, then delete them:
+If you would rather not touch the session, add compatibility mounts to
+`media/compose.yaml` so both spellings resolve, migrate at leisure, then delete
+them:
 
 ```yaml
-      - /mnt/active/movies:/auto_movies
-      - /mnt/active/tv:/auto_tv
+      - /mnt/active/downloads/movies:/auto_movies
+      - /mnt/active/downloads/tv:/auto_tv
       - /mnt/active/incomplete:/auto_incomplete
 ```
 
-The alternative is legitimate: let the Pi seed the old layout until it drains,
-and start the new box with a fresh session. Finished files are already in the
-library; only in-flight torrents are lost.
+**Then adopt the library.** With Radarr and Sonarr configured (§8), use
+*Movies → Library Import* (Radarr) and *Series → Library Import* (Sonarr) pointed
+at `/data/downloads/movies` and `/data/downloads/tv`. They match each folder to a
+title, then import into `/data/library/...` by **hardlink** — so nothing is
+copied, the disk does not grow, and the torrents carry on seeding from
+`downloads/` untouched. Expect to correct a few mismatched titles by hand; that
+is the whole cost.
+
+Point Plex's libraries at `library/` afterwards, not `downloads/`, and remove the
+old folders from the library so the same film does not appear twice.
+
+The alternative is legitimate: let the Pi seed the old layout until it drains and
+start clean. Finished files are already in `/mnt/archive`, so only in-flight
+torrents are lost.
 
 ### 15d. Moving to the mini PC
 
@@ -1127,13 +1146,16 @@ Then on the mini PC, after §1–§3 and before first start (§7 step 5):
 Four things to know about the moved state:
 
 - **Plex's library survives the architecture change.** The database is portable,
-  and the library *paths* that matter are container-side (`/active/movies`,
+  and the library *paths* that matter are container-side (`/data/library/movies`,
   `/archive/movies`), so they do not change with the hardware. No full rescan.
+  They *did* change in 15b, though, so do that restructure once and let the mini
+  PC inherit the finished shape.
 - **Keep a `plex.tv/claim` token ready** in case the server shows as unclaimed;
   usually the machine identity in the config carries over and it does not.
 - **Copy qBittorrent's config only while the container is stopped**, or it will
   be overwritten on exit. Its session survives, because by now the container
-  paths are already the new ones.
+  paths are already the new ones. The same applies to Radarr's, Sonarr's and
+  Bazarr's SQLite databases — all under `/srv/appdata`, all in the tarball.
 - **Prowlarr's TorrentDay cookie may have expired.** Re-authenticating the
   indexer is quicker than debugging an empty search.
 

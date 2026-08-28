@@ -5,13 +5,14 @@
 # 1. qbittorrent and prowlarr use `network_mode: "service:gluetun"`, so they
 #    have no network identity of their own — reach them at http://gluetun:<port>
 #    and never give them a `ports:` block. README §5.
-# 2. qBittorrent sees exactly one mount, /data, which is the whole active disk.
-#    Incomplete and finished folders are therefore always on one filesystem, so
-#    completion is a rename rather than a copy — structurally, not by
-#    remembering to keep two paths in sync. README §1.
+# 2. Everything that touches media mounts /mnt/active at the SAME container
+#    path, /data — qBittorrent here, Radarr/Sonarr/Bazarr in arr.yaml, Plex
+#    read-only below. One mount means completion is a rename and an *arr import
+#    is a hardlink; one shared spelling means the path qBittorrent reports is
+#    the path Radarr can open. README §1 and §13.
 #
 # Hardware-specific bits (Quick Sync, VPN cipher) live in ../hw/, selected by
-# COMPOSE_FILE in ~/stack/.env.
+# COMPOSE_FILE in ~/stack/.env. The automation layer is ./arr.yaml.
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
@@ -61,7 +62,9 @@ services:
     volumes:
       - /srv/appdata/qbittorrent:/config
       # One mount, the whole active disk — see rule 2 above. Inside it:
-      # incomplete/, movies/, tv/, other/.
+      # incomplete/, downloads/{movies,tv}/, library/{movies,tv}/, books/,
+      # other/. Radarr and Sonarr set their own categories and save paths here;
+      # books/ and other/ are yours, for manual Prowlarr grabs (README §8).
       - /mnt/active:/data
     restart: unless-stopped
 
@@ -77,39 +80,6 @@ services:
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
       - /srv/appdata/prowlarr:/config
-    restart: unless-stopped
-
-  finder:
-    build: ../../git/torrent_finder
-    container_name: torrent-finder
-    depends_on: [prowlarr]
-    # No media mount on purpose: the finder only ever talks to qBittorrent's and
-    # Prowlarr's APIs. These paths are what it tells qBittorrent to use, so they
-    # are qBittorrent's container paths, not the finder's.
-    environment:
-      - TZ=${TZ:-Europe/Stockholm}
-      # gluetun, not prowlarr/qbittorrent — see README §5.
-      - PROWLARR_URL=http://gluetun:9696
-      - PROWLARR_API_KEY=${PROWLARR_API_KEY:?set in ~/stack/.env}
-      - QBITTORRENT_URL=http://gluetun:8080
-      - QBITTORRENT_USERNAME=${QBITTORRENT_USERNAME:-admin}
-      - QBITTORRENT_PASSWORD=${QBITTORRENT_PASSWORD:?set in ~/stack/.env}
-      # One category per directory. `other` is the residual — software, games,
-      # xxx, anything the classifier could not place — not "everything that is
-      # not video".
-      - MOVIES_SAVE_PATH=/data/movies
-      - TV_SAVE_PATH=/data/tv
-      - MUSIC_SAVE_PATH=/data/music
-      - BOOKS_SAVE_PATH=/data/books
-      - OTHER_SAVE_PATH=/data/other
-      - MAX_TORRENT_SIZE_GB=${MAX_TORRENT_SIZE_GB:-25}
-      - MIN_FREE_SPACE_GB=${MIN_FREE_SPACE_GB:-20}
-      - INDEXER_NAME=TorrentDay
-      # This app is published on the internet; refuse to start without auth.
-      - UI_USERNAME=${UI_USERNAME:?set in ~/stack/.env}
-      - UI_PASSWORD=${UI_PASSWORD:?set in ~/stack/.env}
-    ports:
-      - "8010:8000"    # LAN only; the tunnel uses the container port directly
     restart: unless-stopped
 
   plex:
@@ -131,10 +101,10 @@ services:
       # fails playback rather than spilling to disk, so size it for every
       # concurrent transcode.
       - /srv/appdata/plex/transcode:/transcode
-      # Read-only: Plex writes metadata to /config, never to the library. This
-      # also means Plex's own "delete media" is inert — deleting is the finder's
-      # job, through qBittorrent, which has /data read-write.
-      - /mnt/active:/active:ro
+      # The same /data spelling as everything else, read-only: Plex writes
+      # metadata to /config, never to the library. Libraries point at
+      # /data/library/movies and /data/library/tv (README §8).
+      - /mnt/active:/data:ro
       - /mnt/archive:/archive:ro
     # tmpfs:
     #   - /transcode:size=4g

@@ -11,6 +11,7 @@
 # into ~/git first (README §7) or comment the line out.
 include:
   - media/compose.yaml
+  - media/arr.yaml
   - apps/matte-vm.yaml
   - apps/jellyseerr.yaml
   - apps/kometa.yaml

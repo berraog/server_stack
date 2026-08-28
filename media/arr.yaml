@@ -1,0 +1,63 @@
+# The automation layer: Radarr owns movies, Sonarr owns TV, Bazarr owns their
+# subtitles. Split out from media/compose.yaml, which keeps the infrastructure
+# these three sit on top of (VPN, download client, indexer proxy, Plex).
+#
+# None of them needs the VPN. Prowlarr already talks to indexers through
+# gluetun's namespace and qBittorrent already talks to peers through it, so
+# these three only ever speak to those two — by service name, at gluetun
+# (README §5) — plus TMDB and TheTVDB directly.
+#
+# All three mount /mnt/active as /data, the SAME container path qBittorrent
+# uses. That is not cosmetic: qBittorrent reports a finished torrent's location
+# as a path, and Radarr has to find the file at that exact path to import it.
+# Different mount points on the two sides is the single most common reason an
+# *arr import silently never happens (README §13).
+services:
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      - /srv/appdata/radarr:/config
+      # Root folder /data/library/movies, importing from /data/downloads/movies.
+      # One mount, so the import is a hardlink and the torrent keeps seeding.
+      - /mnt/active:/data
+    ports:
+      - "7878:7878"    # LAN only — an admin tool, never on the tunnel (§9)
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      - /srv/appdata/sonarr:/config
+      - /mnt/active:/data
+    ports:
+      - "8989:8989"    # LAN only
+    restart: unless-stopped
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    # Bazarr has no library of its own: it asks Radarr and Sonarr what exists
+    # and where. Both are plain bridge services, so their names resolve.
+    depends_on: [radarr, sonarr]
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      - /srv/appdata/bazarr:/config
+      # Read-write, and the same /data path again: Bazarr writes .srt files
+      # alongside the video files Radarr and Sonarr told it about.
+      - /mnt/active:/data
+    ports:
+      - "6767:6767"    # LAN only
+    restart: unless-stopped
