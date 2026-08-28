@@ -13,6 +13,7 @@ include:
   - media/compose.yaml
   - apps/matte-vm.yaml
   - apps/jellyseerr.yaml
+  - apps/kometa.yaml
 
 services:
   # The only cloudflared on the box. Every public hostname points at a service

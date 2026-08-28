@@ -1,0 +1,31 @@
+# Kometa (formerly Plex-Meta-Manager) — builds collections, applies posters and
+# sorts libraries by talking to Plex's API. Needs no Sonarr/Radarr: Plex plus a
+# TMDB key is enough, which is why this one fits the box as it stands.
+#
+# Unlike everything else here it is NOT a web service. It is a scheduled batch
+# job with no UI, no port and no Cloudflare hostname; it wakes on a timer, edits
+# metadata in Plex, and sleeps. There is nothing to browse — the output is the
+# Plex library itself, and the logs.
+services:
+  kometa:
+    # Pin once a version is known good: Kometa changes config schema between
+    # releases often enough that `latest` can break a working config overnight.
+    image: kometateam/kometa:latest
+    container_name: kometa
+    # Plex runs network_mode: host, so http://plex:32400 does not resolve — see
+    # README §10. config.yml points at http://host.docker.internal:32400.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TZ: "${TZ:-Europe/Stockholm}"
+      # Daily run time. Kometa's own docs are the authority on the rest of its
+      # environment; everything that matters lives in config.yml anyway.
+      KOMETA_TIME: "${KOMETA_TIME:-05:00}"
+    volumes:
+      # Holds config.yml, which carries the Plex token and TMDB key — this is
+      # the one app whose secrets are in a file rather than in ~/stack/.env.
+      - /srv/appdata/kometa:/config
+    # No ports: nothing listens. No healthcheck: an idle scheduler is not
+    # "unhealthy", and a run-once container plus restart: unless-stopped is a
+    # restart loop, so leave the scheduler in charge (README §8).
+    restart: unless-stopped

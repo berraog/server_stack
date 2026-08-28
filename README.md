@@ -13,6 +13,7 @@ describes the machine and, through `compose.yaml`, assembles it.
 | media | gluetun (VPN), qBittorrent, Prowlarr, Plex, torrent-finder | `media.bjorngreen.se`, LAN ports |
 | matte-vm | FastAPI + SQLite + PWA | its own Cloudflare hostname |
 | jellyseerr | request front-end for Plex | its own Cloudflare hostname |
+| kometa | Plex collections and posters | nothing — scheduled job, no UI |
 | (others) | added per the template in §10 | one hostname each |
 | shared | cloudflared — **one** tunnel for the whole box | — |
 
@@ -198,6 +199,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
   media/compose.yaml              gluetun, qbittorrent, prowlarr, plex, finder
   apps/matte-vm.yaml              one fragment per standalone app
   apps/jellyseerr.yaml            third-party image, same shape
+  apps/kometa.yaml                scheduled job: no port, no hostname
   hw/x86.yaml, hw/pi.yaml         per-hardware overlays, picked in .env
   bin/autodeploy                  poll git, redeploy what changed
   autodeploy.conf                 repo -> service map
@@ -296,7 +298,8 @@ allocated" surprise when adding an app.
 | 32400 | Plex | `network_mode: host` |
 
 Container ports never collide, only host ports. An app reachable solely through
-the tunnel needs no `ports:` entry at all.
+the tunnel needs no `ports:` entry at all, and a batch job like `kometa` needs
+none either — it never listens.
 
 ## 5. The rule that breaks things first
 
@@ -590,16 +593,98 @@ listening. What still works, and is most of the value:
 So the loop closes on its own; only the middle step is manual. A request comes
 in, you search it in torrent-finder, and Jellyseerr notices when Plex does.
 
-Making it fully automatic is a real decision, not a config change, and there are
-two routes:
+Making it fully automatic is a decision rather than a config change — see *The
+Sonarr/Radarr question* below. Neither route is required to start using it as an
+inbox, and neither is foreclosed by doing so.
 
-| Route | What it costs |
+### Kometa (no UI — `docker compose logs kometa`)
+
+Kometa refuses to start without a config, so write one before first run:
+
+```bash
+sudo mkdir -p /srv/appdata/kometa && sudo chown -R 1000:1000 /srv/appdata/kometa
+# the image ships a fully commented template; take it and edit
+docker run --rm kometateam/kometa:latest cat /config/config.yml.template \
+  | sudo tee /srv/appdata/kometa/config.yml >/dev/null
+sudo nano /srv/appdata/kometa/config.yml
+```
+
+Three values make it work, and the Plex one is the only awkward part:
+
+| Setting | Value |
 | --- | --- |
-| Add Sonarr + Radarr | The standard chain: Jellyseerr → Sonarr/Radarr → Prowlarr → qBittorrent. Two more containers, and they insist on owning save paths, renaming and qBittorrent categories — which overlaps torrent-finder almost exactly and would fight `MANAGE_CATEGORIES` over the same categories (§8). Pick one to own routing. |
-| Teach torrent-finder to accept a webhook | Jellyseerr can POST an approved request; the finder already searches Prowlarr and pushes to qBittorrent, so it is the search-and-pick step that would need automating. Keeps one downloader, but it is development rather than deployment. |
+| `plex.url` | `http://host.docker.internal:32400` — **not** `http://plex:32400` (§10) |
+| `plex.token` | in Plex web, open any item → *Get Info* → *View XML*; the `X-Plex-Token` in that URL |
+| `tmdb.apikey` | free from themoviedb.org → Settings → API |
 
-Neither is required to start using it as an inbox, and neither is foreclosed by
-doing so.
+Then a first run you actually watch, rather than discovering the result at 05:00:
+
+```bash
+cd ~/stack && docker compose up -d kometa
+docker compose logs -f kometa
+```
+
+**Start with collections, add overlays later.** Kometa applies overlays — the
+4K/HDR badges on posters — by uploading modified artwork into Plex, so they are
+not a view but a change to your library, and backing them out is fiddlier than
+adding them. Collections and sort titles are cheap to undo by comparison. The
+real escape hatch if a run makes a mess is the Plex database from the §12 backup,
+which is heavy but genuine, so take one before the first overlay run.
+
+Nothing here is on a hostname or a port. If Kometa appears to do nothing, it is
+almost always the schedule: `KOMETA_TIME` and the container's timezone decide
+when it wakes, and the logs say what it did.
+
+### Bazarr — not usable on this box
+
+Bazarr manages subtitles, and it is worth wanting. It cannot run here yet, and
+this is a hard dependency rather than a configuration gap: **Bazarr has no
+library of its own.** It does not scan directories; it asks Sonarr and Radarr for
+the list of movies and series and their paths, then fetches subtitles for those.
+With neither installed, its first-run wizard has nothing to connect to and the
+library stays empty. Adding the container would give you a working web UI that
+knows about no media at all.
+
+The immediate need it would serve is already covered from a different direction:
+the subtitle guidance above has Plex fetching SRTs through its own subtitle
+agent, which is what keeps image subtitles from being the only option and stops
+the burn-in transcodes. Bazarr does that job considerably better — more
+providers, scoring, per-language rules, upgrades over time — but "considerably
+better" is the gap here, not "possible versus impossible".
+
+### The Sonarr/Radarr question
+
+Three things now want these, so it is worth deciding once rather than per app:
+
+| Wants it | For what | Without it |
+| --- | --- | --- |
+| Jellyseerr | fulfilling an approved request | works as a request inbox; you grab it by hand |
+| Bazarr | knowing what media exists at all | does not work |
+| Kometa | optional list sources only | fully functional |
+
+The cost is not the two containers. It is that Sonarr and Radarr expect to own
+the download pipeline end to end: they pick releases, set qBittorrent categories
+and save paths, and rename and move finished files into a folder structure they
+maintain. That is very nearly the entire job `torrent-finder` does, and both
+would be writing the same qBittorrent categories — the finder's
+`MANAGE_CATEGORIES` and Radarr's category settings fighting over `movies`. So
+this is not "add two apps", it is **choosing which one routes downloads**:
+
+- **Keep torrent-finder as the router.** Jellyseerr stays an inbox, Bazarr stays
+  off the box, and searching stays a deliberate act you perform. Nothing changes.
+- **Hand routing to Sonarr/Radarr.** Set `MANAGE_CATEGORIES=false` so the finder
+  stops competing, and let it become a manual search tool beside them rather
+  than the thing that files downloads. The *arr apps then own §8's category
+  table, and the §1 layout has to survive their renaming rules — they are
+  happiest with one root per library type, which `/mnt/active/{movies,tv}`
+  already is.
+- **Bridge them.** Jellyseerr can POST an approved request to a webhook, and the
+  finder already searches Prowlarr and pushes to qBittorrent; only the
+  choose-a-release step is missing. Keeps one router and one folder scheme, at
+  the cost of writing it.
+
+Nothing here needs deciding today, and the layout in §1 does not change under
+any of the three.
 
 ## 9. Cloudflare
 
@@ -729,6 +814,20 @@ other direction. Map the host gateway in and use that:
 
 Everything else in the stack is a normal bridge service, so `http://<service
 name>:<container port>` works as expected between them.
+
+### One that is a scheduled job
+
+`kometa` is the odd one: no port, no hostname, no healthcheck, nothing to browse.
+Two things follow that are easy to get wrong.
+
+- **Do not add a healthcheck.** A scheduler sitting idle between runs answers
+  nothing, so any check marks it unhealthy forever.
+- **Do not make it run once.** A container that runs and exits, paired with
+  `restart: unless-stopped`, is a restart loop that hammers the Plex API. Let the
+  image's own scheduler own the timing and leave the container up.
+
+Its output is the Plex library and `docker compose logs kometa`, so that is where
+you look to know whether it worked.
 
 ### "Plex addons" are not a thing any more
 
