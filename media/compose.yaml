@@ -4,6 +4,11 @@
 # no network identity of their own — see README §5 before changing anything
 # here. In short: reach them at http://gluetun:<port>, never by their own name,
 # and they may never carry a `ports:` block.
+#
+# Storage split (README §1): container state on the internal SSD under
+# /srv/appdata, bulk media on the USB drives. Downloads in progress stay on
+# /mnt/usb2 with the finished folders on purpose — same filesystem means
+# completion is a rename, and the finder's free-space guard measures that disk.
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
@@ -14,7 +19,12 @@ services:
       - VPN_SERVICE_PROVIDER=nordvpn
       - VPN_TYPE=openvpn
       - OPENVPN_PROTOCOL=udp
-      - OPENVPN_CIPHERS=AES-128-GCM
+      # No cipher pin: AES-128-GCM was a concession to the Pi's CPU. This box
+      # has AES-NI, so gluetun's default (AES-256-GCM) costs nothing. For real
+      # throughput the next step is VPN_TYPE=wireguard — see README §2.
+      #
+      # Carried over from the Pi, where it fixed fragmentation on this ISP.
+      # Raise or drop it if throughput disappoints; revert if torrents stall.
       - VPN_MTU=1320
       # Nord *service* credentials, not the login email/password.
       - OPENVPN_USER=${NORDVPN_SERVICE_USER:?set in ~/stack/.env}
@@ -23,7 +33,7 @@ services:
       - TZ=${TZ:-Europe/Stockholm}
       - UPDATER_PERIOD=24h
     volumes:
-      - /mnt/ssd/gluetun:/gluetun
+      - /srv/appdata/gluetun:/gluetun
     # EVERY port for every container in gluetun's namespace is published here.
     ports:
       - "8080:8080"      # qBittorrent WebUI
@@ -50,11 +60,11 @@ services:
       - TZ=${TZ:-Europe/Stockholm}
       - WEBUI_PORT=8080
     volumes:
-      - /mnt/ssd/qbittorrent-config:/config
-      - /mnt/ssd/media:/downloads
-      - /mnt/ssd2/share/torrents/movies:/auto_movies
-      - /mnt/ssd2/share/torrents/tv:/auto_tv
-      - /mnt/ssd2/share/torrents/incomplete:/auto_incomplete
+      - /srv/appdata/qbittorrent:/config
+      - /mnt/usb1/media:/downloads
+      - /mnt/usb2/share/torrents/movies:/auto_movies
+      - /mnt/usb2/share/torrents/tv:/auto_tv
+      - /mnt/usb2/share/torrents/incomplete:/auto_incomplete
     restart: unless-stopped
 
   prowlarr:
@@ -68,7 +78,7 @@ services:
       - PGID=${PGID:-1000}
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
-      - /mnt/ssd/prowlarr-config:/config
+      - /srv/appdata/prowlarr:/config
     restart: unless-stopped
 
   finder:
@@ -83,6 +93,7 @@ services:
       - QBITTORRENT_URL=http://gluetun:8080
       - QBITTORRENT_USERNAME=${QBITTORRENT_USERNAME:-admin}
       - QBITTORRENT_PASSWORD=${QBITTORRENT_PASSWORD:?set in ~/stack/.env}
+      # Container-side paths, unchanged by the move off the Pi.
       - MOVIES_SAVE_PATH=/auto_movies
       - TV_SAVE_PATH=/auto_tv
       - OTHER_SAVE_PATH=/downloads/other
@@ -100,6 +111,14 @@ services:
     image: lscr.io/linuxserver/plex:latest
     container_name: plex
     network_mode: host          # needed for DLNA/GDM local discovery
+    # Quick Sync on the N95's iGPU. The gid of the host's `render` group varies
+    # per install, so it comes from .env: getent group render | cut -d: -f3
+    # Hardware transcoding itself needs Plex Pass; without it this is inert but
+    # harmless. Enable in Settings > Transcoder (README §8).
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:?run: getent group render | cut -d: -f3}"
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
@@ -109,9 +128,14 @@ services:
       # minutes — https://plex.tv/claim
       # - PLEX_CLAIM=${PLEX_CLAIM}
     volumes:
-      - /mnt/ssd2/plex/config:/config
-      - /mnt/ssd2/plex/transcode:/transcode
-      - /mnt/ssd/media:/media
-      - /mnt/ssd2/share/torrents/movies:/movies2
-      - /mnt/ssd2/share/torrents/tv:/tv2
+      - /srv/appdata/plex/config:/config
+      # Transcode scratch: heavy short-lived writes. Swap for the tmpfs below if
+      # RAM allows (needs headroom for every concurrent transcode; a full tmpfs
+      # fails playback rather than spilling to disk).
+      - /srv/appdata/plex/transcode:/transcode
+      - /mnt/usb1/media:/media
+      - /mnt/usb2/share/torrents/movies:/movies2
+      - /mnt/usb2/share/torrents/tv:/tv2
+    # tmpfs:
+    #   - /transcode:size=4g
     restart: unless-stopped

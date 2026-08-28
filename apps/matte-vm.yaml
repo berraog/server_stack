@@ -1,0 +1,25 @@
+# matte-vm, defined here rather than by including ~/git/matte-vm's own compose
+# file — the same pattern media/compose.yaml uses for the finder. The app repo
+# then stays free to ship whatever compose file makes it convenient to run
+# standalone (including its own cloudflared), because the stack never reads it.
+services:
+  app:
+    build: ../../git/matte-vm
+    container_name: matte-vm
+    environment:
+      TZ: "${TZ:-Europe/Stockholm}"
+      MVM_KID_PIN: "${MVM_KID_PIN:?set in ~/stack/.env}"
+      MVM_PARENT_PASSWORD: "${MVM_PARENT_PASSWORD:?set in ~/stack/.env}"
+    volumes:
+      # On the internal SSD, and outside the git checkout that autodeploy runs
+      # `git reset --hard` on. The app's own compose file uses ./data.
+      - /srv/appdata/matte-vm:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped

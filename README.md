@@ -1,7 +1,8 @@
-# raspberra — homelab runbook
+# homelab runbook
 
-Everything needed to rebuild this Raspberry Pi from a blank SD card, plus how to
-change or extend it afterwards. This file is the `stack` repo: the repo that
+Everything needed to rebuild this server from a blank disk, plus how to change
+or extend it afterwards. The hardware is a BOSGAME mini PC (Intel N95) running
+Ubuntu Server 24.04; §15 covers moving here from the old Raspberry Pi. This file is the `stack` repo: the repo that
 describes the machine and, through `compose.yaml`, assembles it.
 
 **What runs here**
@@ -28,48 +29,113 @@ describes the machine and, through `compose.yaml`, assembles it.
 
 ---
 
-## 1. Hardware and OS
+## 1. Hardware, OS and disks
 
-- Raspberry Pi (arm64), Raspberry Pi OS 64-bit (Bookworm or newer).
-- Two USB SSDs:
-  - `/mnt/ssd` — qBittorrent config, `media/` library, downloads-in-progress
-  - `/mnt/ssd2` — Plex config/transcode, `share/torrents/{movies,tv,incomplete}`
-- Wired ethernet. A static DHCP lease for the Pi makes LAN URLs stable.
+- BOSGAME mini PC, Intel N95 (Alder Lake-N, x86_64), Ubuntu Server 24.04 LTS.
+- **Internal 500 GB SSD** — Ubuntu, Docker images, and `/srv/appdata`: every
+  container's config and database.
+- **Two USB SSDs**, bulk media only:
+  - `/mnt/usb1` — the hand-managed library, `media/{movies,tv,other}`
+  - `/mnt/usb2` — torrent-managed content, `share/torrents/{movies,tv,incomplete}`
+- Wired ethernet. A static DHCP lease makes LAN URLs stable.
 
-Mount both at boot. Get the UUIDs with `lsblk -f`, then in `/etc/fstab`:
+Why state sits on the internal disk and media does not: Plex's library is a
+SQLite database bound by random writes, so its location is the one you can
+actually feel, while media is sequential, re-downloadable, and far too big for
+500 GB. The mountpoints say `usb`, not `ssd`, because internal-versus-USB is now
+the distinction that matters — all three disks are SSDs.
 
-```fstab
-UUID=xxxx-xxxx  /mnt/ssd   ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
-UUID=yyyy-yyyy  /mnt/ssd2  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
-```
+**What deliberately stays on the USB drive: downloads in progress.** Two things
+depend on `share/torrents/incomplete` sharing a filesystem with the finished
+`movies`/`tv` folders — completion is a rename instead of a cross-disk copy, and
+the finder's free-space guard measures qBittorrent's *default* save path (§8).
+Move it to the internal SSD and `MIN_FREE_SPACE_GB` starts guarding 500 GB while
+the media drive silently fills.
 
-`nofail` matters: without it a disconnected USB SSD leaves the Pi stuck in
-emergency mode with no network, which on a headless box means a keyboard hunt.
-`noatime` cuts pointless writes.
+### The installer's LVM default will hide 400 GB
+
+Ubuntu Server's guided LVM layout gives the root logical volume ~100 GB and
+leaves the rest of the volume group unallocated. Set the size during install, or
+afterwards:
 
 ```bash
-sudo mount -a && df -h /mnt/ssd /mnt/ssd2
+sudo vgs && sudo lvs                       # VFree > 0 means this bit is needed
+sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+sudo resize2fs /dev/ubuntu-vg/ubuntu-lv
+df -h /
+```
+
+### Mount the USB drives at boot
+
+Get the UUIDs with `lsblk -f`, then in `/etc/fstab`:
+
+```fstab
+UUID=xxxx-xxxx  /mnt/usb1  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+UUID=yyyy-yyyy  /mnt/usb2  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+```
+
+`nofail` matters: without it a disconnected USB SSD leaves the box stuck in
+emergency mode with no network, which on a headless machine means a keyboard
+hunt. `noatime` cuts pointless writes.
+
+```bash
+sudo mkdir -p /mnt/usb1 /mnt/usb2
+sudo mount -a && df -h / /mnt/usb1 /mnt/usb2
 ```
 
 ## 2. Dependencies
 
 | Thing | Why | Install / check |
 | --- | --- | --- |
-| Docker Engine | everything | `curl -fsSL https://get.docker.com \| sh` |
+| Docker Engine | everything | Docker's apt repo — see below |
 | Docker Compose **v2.20+** | the `include:` top-level key | `docker compose version` |
-| git | deploys are `git fetch` | `sudo apt install git` |
-| python3 | autodeploy helpers, qbt password tool | preinstalled |
-| curl, jq | health checks | `sudo apt install curl jq` |
+| git | deploys are `git fetch` | preinstalled |
+| python3 | autodeploy helpers, qbt password tool | preinstalled (3.12) |
+| curl | health checks | preinstalled |
+| jq | health checks | `sudo apt install jq` |
 | `/dev/net/tun` | gluetun's VPN device | present by default |
+| `/dev/dri/renderD128` | Plex Quick Sync (§8) | present once `i915` loads |
+
+**Install Docker from Docker's own repo.** Two Ubuntu-flavoured ways to get this
+wrong:
+
+- `snap install docker` — **never.** Snap's strict confinement blocks bind
+  mounts outside `/home` and `$SNAP_DATA`, which is every volume in this stack,
+  and the failure looks like an empty container directory rather than an error.
+  If it is already there: `sudo snap remove --purge docker`.
+- `apt install docker.io` — Ubuntu's package is too old. Below Compose v2.20
+  `include:` is silently unsupported and the whole assembly quietly does nothing.
 
 ```bash
-sudo usermod -aG docker "$USER"   # then log out and back in
-id -u; id -g                      # expect 1000/1000 — the PUID/PGID everywhere
-docker compose version            # must be >= v2.20.0
+curl -fsSL https://get.docker.com | sh   # adds Docker's apt repo, installs both
+sudo usermod -aG docker "$USER"          # then log out and back in
+id -u; id -g                             # expect 1000/1000 — the PUID/PGID everywhere
+docker compose version                   # must be >= v2.20.0
 ```
 
-If Compose is older than 2.20, `include:` is silently unsupported — upgrade
-Docker from Docker's own apt repo rather than Debian's `docker.io` package.
+**The render group, for Plex hardware transcoding.** The gid differs between
+installs, so it is a variable rather than a literal in the compose file:
+
+```bash
+ls -l /dev/dri/renderD128                # must exist
+getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.env
+```
+
+**Three Ubuntu defaults worth knowing before they surprise you**
+
+- **`unattended-upgrades` is on.** It will update `docker-ce` and restart the
+  daemon, which restarts every container. `restart: unless-stopped` recovers,
+  but a gluetun restart interrupts every active torrent (§12). To stop that:
+  `sudo apt-mark hold docker-ce docker-ce-cli containerd.io`, and update Docker
+  deliberately instead.
+- **`ufw` does not filter published container ports.** Docker inserts its own
+  rules ahead of ufw's chains, so anything in a `ports:` block is reachable on
+  the LAN whatever ufw claims. Close a port by deleting the `ports:` entry, not
+  with a firewall rule.
+- **systemd-resolved** puts `127.0.0.53` in `/etc/resolv.conf`. Docker sees a
+  loopback-only resolver and gives bridge containers public DNS instead, logging
+  a warning at daemon start. Harmless here — it makes cloudflared's `dns:` block
+  redundant rather than wrong.
 
 **Accounts and secrets to have in hand**
 
@@ -80,6 +146,7 @@ Docker from Docker's own apt repo rather than Debian's `docker.io` package.
 | Cloudflare tunnel token | Zero Trust → Networks → Tunnels → Create → Docker → the `TUNNEL_TOKEN` value |
 | TorrentDay account | for the Prowlarr indexer (cookie auth) |
 | Plex claim token | https://plex.tv/claim — valid 4 minutes, first run only |
+| Plex Pass | only for hardware transcoding; without it Plex transcodes in software |
 
 ## 3. Repository layout
 
@@ -88,23 +155,41 @@ Docker from Docker's own apt repo rather than Debian's `docker.io` package.
   README.md                       this file
   compose.yaml                    include: list + cloudflared
   media/compose.yaml              gluetun, qbittorrent, prowlarr, plex, finder
+  apps/matte-vm.yaml              one fragment per standalone app
   bin/autodeploy                  poll git, redeploy what changed
   autodeploy.conf                 repo -> service map
   systemd/autodeploy.{service,timer}   installed into /etc (§11)
   .env                            ALL secrets, gitignored
   .env.example                    same keys, no values, committed
   .gitignore
-~/git/matte-vm/                   app repo: Dockerfile + docker-compose.yml
+~/git/matte-vm/                   app repo: Dockerfile + its own compose file
 ~/git/torrent_finder/             app repo: Dockerfile + app/
 ~/git/<next-app>/                 same shape
+/srv/appdata/<service>/           container state, internal SSD (§1)
+/mnt/usb1/, /mnt/usb2/            bulk media, USB drives (§1)
 ```
 
 Why apps stay outside `~/stack`: each one keeps a compose file that works on its
 own (`cd ~/git/matte-vm && docker compose up`), which is what makes it testable
 in isolation, while `~/stack` composes them into the real machine.
 
+**The stack does not read those app compose files.** Each app gets a fragment
+here that only `build:`s from `~/git/<app>`. That is the pattern `media/` already
+used for the finder, generalised — because an included app file must not define
+`cloudflared`, must not set `networks:`, and must not collide on a host port,
+and an app repo that predates those rules breaks the whole assembly:
+
+```
+services.cloudflared conflicts with imported resource
+```
+
+`config -q` fails, so nothing starts and autodeploy refuses every deploy. Owning
+the fragments here removes the rule instead of documenting it, and leaves the app
+repos free to ship whatever compose file is convenient for standalone use.
+
 `include:` resolves each file's relative paths against **that file's own
-directory**, so an app's `build: .` keeps meaning its own repo.
+directory**, so `apps/matte-vm.yaml` reaching `../../git/matte-vm` works from
+wherever compose is invoked.
 
 ### The two compose files
 
@@ -112,6 +197,8 @@ Read them rather than a copy pasted here — [`compose.yaml`](compose.yaml) and
 [`media/compose.yaml`](media/compose.yaml) are short and commented. What is
 worth knowing before opening them:
 
+- `apps/matte-vm.yaml` is the template for a new app — one service, state under
+  `/srv/appdata`, a healthcheck, nothing about tunnels or networks.
 - `compose.yaml` is an `include:` list plus the box's single `cloudflared`. Its
   `dns:` override does not break service discovery: on a user-defined network
   Docker keeps its own resolver at 127.0.0.11 inside the container and uses
@@ -173,7 +260,7 @@ chmod 600 ~/stack/.env
 nano ~/stack/.env
 ```
 
-Back `.env` up somewhere outside the Pi — a password manager entry is enough. It
+Back `.env` up somewhere off the box — a password manager entry is enough. It
 is the one file that cannot be reconstructed from the repos.
 
 **Which credential does what** — the question that always comes back:
@@ -198,9 +285,11 @@ cd ~ && git clone git@github.com:<you>/stack.git       # this repo
 cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.env
 
 # 3. data directories, owned by the container user
-sudo mkdir -p /mnt/ssd/{gluetun,qbittorrent-config,prowlarr-config,media/other} \
-              /mnt/ssd2/{plex/config,plex/transcode,share/torrents/{movies,tv,incomplete}}
-sudo chown -R 1000:1000 /mnt/ssd /mnt/ssd2
+#    internal SSD: container state.  USB drives: bulk media only.
+sudo mkdir -p /srv/appdata/{gluetun,qbittorrent,prowlarr,plex/config,plex/transcode,matte-vm}
+sudo mkdir -p /mnt/usb1/media/{movies,tv,other} \
+              /mnt/usb2/share/torrents/{movies,tv,incomplete}
+sudo chown -R 1000:1000 /srv/appdata /mnt/usb1 /mnt/usb2
 
 # 4. sanity-check the assembled config before starting anything
 cd ~/stack
@@ -221,14 +310,14 @@ Then the per-service configuration in §8, and the tunnel in §9.
 important check on this box:
 
 ```bash
-curl -s ifconfig.me; echo                            # the Pi's ISP address
+curl -s ifconfig.me; echo                            # the box's ISP address
 docker compose exec qbittorrent curl -s ifconfig.me   # must be the VPN address
 docker compose exec prowlarr curl -s ifconfig.me      # must match qBittorrent
 ```
 
 ## 8. Per-container configuration
 
-### qBittorrent (`http://<pi>:8080`)
+### qBittorrent (`http://<host>:8080`)
 
 linuxserver's image prints a **new temporary password on every start** until a
 permanent one is set, which would break the finder on each reboot.
@@ -250,9 +339,9 @@ docker compose logs qbittorrent | grep -i "temporary password"
 
    | Category | Save path | Host path | Plex sees |
    | --- | --- | --- | --- |
-   | `movies` | `/auto_movies` | `/mnt/ssd2/share/torrents/movies` | `/movies2` |
-   | `tv` | `/auto_tv` | `/mnt/ssd2/share/torrents/tv` | `/tv2` |
-   | `other` | `/downloads/other` | `/mnt/ssd/media/other` | `/media/other` |
+   | `movies` | `/auto_movies` | `/mnt/usb2/share/torrents/movies` | `/movies2` |
+   | `tv` | `/auto_tv` | `/mnt/usb2/share/torrents/tv` | `/tv2` |
+   | `other` | `/downloads/other` | `/mnt/usb1/media/other` | `/media/other` |
 
    The finder creates any that are missing. If you set them here instead, drop
    the `*_SAVE_PATH` variables and it follows whatever qBittorrent says.
@@ -262,7 +351,9 @@ library get scanned half-written and pollute it, and the incomplete directory
 sits on the same filesystem as the final folders so completion is a rename
 instead of a cross-disk copy. It is also the disk the finder's free-space guard
 measures — qBittorrent reports free space for the **default save path**, so
-pointing that at ssd2 keeps the reserve honest.
+pointing that at `/mnt/usb2` keeps the reserve honest. This is why downloads in
+progress stayed on a USB drive rather than following the rest of the state onto
+the internal SSD (§1).
 
 **Lost the password entirely:** stop the container first (qBittorrent rewrites
 its config on exit), then either clear the hash to get a fresh temporary
@@ -270,22 +361,22 @@ password, or write a known one:
 
 ```bash
 cd ~/stack && docker compose stop qbittorrent
-cp /mnt/ssd/qbittorrent-config/qBittorrent/qBittorrent.conf{,.bak}
-sed -i '/^WebUI\\Password_PBKDF2=/d' /mnt/ssd/qbittorrent-config/qBittorrent/qBittorrent.conf
+cp /srv/appdata/qbittorrent/qBittorrent/qBittorrent.conf{,.bak}
+sed -i '/^WebUI\\Password_PBKDF2=/d' /srv/appdata/qbittorrent/qBittorrent/qBittorrent.conf
 docker compose up -d qbittorrent
 docker compose logs qbittorrent | grep -i "temporary password"
 # or: python3 ~/git/torrent_finder/deploy/raspberry-pi/qbt_password.py
 #     and paste the line under [Preferences]
 ```
 
-### Prowlarr (`http://<pi>:9696`)
+### Prowlarr (`http://<host>:9696`)
 
 1. *Settings → General → Security*: copy the API key into `PROWLARR_API_KEY`.
 2. *Indexers → Add Indexer → TorrentDay*, authenticate with your account cookie.
 3. Run one search from Prowlarr's own *Search* tab before trusting it from code.
 4. Recreate the finder so it picks up the key: `docker compose up -d finder`.
 
-### torrent-finder (`http://<pi>:8010`, `media.bjorngreen.se`)
+### torrent-finder (`http://<host>:8010`, `media.bjorngreen.se`)
 
 Nothing to configure in a UI; everything is environment. Confirm the routing
 resolved against the real qBittorrent:
@@ -302,12 +393,29 @@ reached the container. Search behaviour: an empty search box browses the ticked
 categories instead of matching a name. Deleting from the downloads drawer
 deletes the files, which for a finished torrent is the copy Plex is serving.
 
-### Plex (`http://<pi>:32400/web`)
+### Plex (`http://<host>:32400/web`)
 
 First run only: uncomment `PLEX_CLAIM`, put a fresh token from
 https://plex.tv/claim in `.env` (it expires in 4 minutes), start Plex, then
 remove it again. Libraries: Movies → `/movies2` and `/media/movies`, TV →
 `/tv2` and `/media/tv`, matching the mounts above.
+
+**Hardware transcoding (Quick Sync).** The N95's iGPU does H.264 and HEVC in
+hardware, which the Pi could not do at all. The compose file already passes
+`/dev/dri` and joins the host's `render` group via `RENDER_GID`; the remaining
+steps are *Settings → Transcoder →* tick **Use hardware acceleration when
+available** (and HW-accelerated video encoding), which needs **Plex Pass**.
+Verify a transcode is actually offloaded:
+
+```bash
+ls -l /dev/dri/renderD128                            # host: device exists
+docker compose exec plex ls -l /dev/dri/renderD128    # container: readable
+sudo apt install intel-gpu-tools && sudo intel_gpu_top   # Video engine busy
+```
+
+The dashboard marks an offloaded stream `(hw)`. `permission denied` on
+`renderD128` inside the container means `RENDER_GID` does not match
+`getent group render` on this host.
 
 ## 9. Cloudflare
 
@@ -343,32 +451,34 @@ curl -sI https://media.bjorngreen.se | head -1
 
 ## 10. Adding a new app
 
-Checklist, then the skeleton:
+The app repo needs nothing but a `Dockerfile`; the stack owns how it is wired in.
 
-1. Its repo has a `Dockerfile` and a `docker-compose.yml` that works standalone.
-2. That compose file defines **only its own services** — no `cloudflared`, no
-   `networks:` block, no host port that collides with §4 (or no `ports:` at all
-   if it is tunnel-only).
-3. `container_name` set, so the tunnel URL is predictable.
-4. Add it to `~/stack/compose.yaml` under `include:`.
-5. Add a line to `~/stack/autodeploy.conf`.
-6. Add any secrets to `~/stack/.env` **and** `.env.example`, referenced with
+1. Clone it into `~/git/<new-app>`.
+2. Write `~/stack/apps/<new-app>.yaml` from the skeleton below — one service,
+   `container_name` set so the tunnel URL is predictable, state under
+   `/srv/appdata/<new-app>`, and a host port from §4 only if you want LAN access.
+3. Add it to `~/stack/compose.yaml` under `include:`.
+4. Add a line to `~/stack/autodeploy.conf`.
+5. Add any secrets to `~/stack/.env` **and** `.env.example`, referenced with
    `${VAR:?set in ~/stack/.env}` so a missing value fails loudly at start.
-7. Add the public hostname in Cloudflare (§9) plus an Access policy.
-8. Update the port registry in §4 and the table at the top of this file.
+6. Add the public hostname in Cloudflare (§9) plus an Access policy.
+7. Update the port registry in §4 and the table at the top of this file.
+
+Whatever compose file the app repo ships is ignored here, so it may keep its own
+`cloudflared`, its own `./data` volume and its own ports for standalone use.
 
 ```yaml
-# ~/git/<new-app>/docker-compose.yml
+# ~/stack/apps/<new-app>.yaml
 services:
   <new-app>:
-    build: .
+    build: ../../git/<new-app>
     container_name: <new-app>
     environment:
       TZ: "${TZ:-Europe/Stockholm}"
       SOME_SECRET: "${NEWAPP_SECRET:?set in ~/stack/.env}"
     volumes:
-      - /mnt/ssd/<new-app>:/data      # state on the SSD, never the SD card
-    # ports:                          # only if you want LAN access
+      - /srv/appdata/<new-app>:/data   # internal SSD, outside the git checkout
+    # ports:                           # only if you want LAN access
     #   - "80xx:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -393,7 +503,7 @@ endpoint, no self-hosted runner, and no secret that grants code execution here.
 All four pieces are committed: [`bin/autodeploy`](bin/autodeploy), the repo →
 service map in [`autodeploy.conf`](autodeploy.conf), and the units in
 [`systemd/`](systemd). `autodeploy.conf` and the units hardcode
-`/home/bjorngreen`; change both if the Pi's user is not `bjorngreen`.
+`/home/bjorngreen`; change both if the Ubuntu user is not `bjorngreen`.
 
 ```bash
 sudo cp ~/stack/systemd/autodeploy.service ~/stack/systemd/autodeploy.timer \
@@ -412,7 +522,7 @@ Three details that matter more than they look:
 - **`config -q` before `up`** — the guard that makes one big project safe. A bad
   push fails the check and the running stack is left alone.
 - **`git reset --hard`** — correct for a deploy checkout, destructive if you
-  ever edit code directly on the Pi. If you do, switch it to `git pull
+  ever edit code directly on the server. If you do, switch it to `git pull
   --ff-only` and let it fail loudly instead.
 
 Not covered by autodeploy, deliberately: `~/stack` itself. Infrastructure
@@ -440,7 +550,7 @@ docker compose pull gluetun && docker compose up -d gluetun
 # state
 docker compose ps
 docker compose logs -f --tail=100 finder
-df -h /mnt/ssd /mnt/ssd2 /
+df -h / /mnt/usb1 /mnt/usb2
 docker system df
 ```
 
@@ -461,19 +571,29 @@ stick.
 
 ```bash
 tar czf ~/backup-$(date +%F).tgz \
-  -C / mnt/ssd/qbittorrent-config/qBittorrent \
-       mnt/ssd/prowlarr-config/config.xml \
-       mnt/ssd2/plex/config/"Library/Application Support/Plex Media Server/Preferences.xml" \
-  -C "$HOME" stack/.env git/matte-vm/data
+  -C / srv/appdata/qbittorrent/qBittorrent \
+       srv/appdata/prowlarr/config.xml \
+       srv/appdata/plex/config/"Library/Application Support/Plex Media Server/Preferences.xml" \
+       srv/appdata/matte-vm \
+  -C "$HOME" stack/.env
 ```
 
-Copy it off the Pi. Media is re-downloadable; `.env`, the Plex library database
-and matte-vm's SQLite file are not.
+Copy it off the box. Everything irreplaceable now lives under `/srv/appdata` on
+one disk, which is convenient for backups and the reason that disk is the one to
+mirror: media is re-downloadable, but `.env`, the Plex library database and
+matte-vm's SQLite file are not.
 
 ## 13. Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| `services.cloudflared conflicts with imported resource` | an included app compose file defines its own cloudflared | include a stack-owned fragment under `apps/` instead (§10) |
+| a container's config directory is empty and never persists | Docker installed from **snap**; confinement blocks binds outside `/home` | `snap remove --purge docker`, reinstall from Docker's repo (§2) |
+| plex: `permission denied` opening `/dev/dri/renderD128` | `RENDER_GID` ≠ the host's render gid | `getent group render \| cut -d: -f3`, fix `.env`, recreate plex |
+| transcodes stay software-only despite `/dev/dri` | Plex Pass missing, or the Transcoder setting not ticked | §8 |
+| `/` is ~100 GB on a 500 GB disk | Ubuntu's guided LVM left the VG unallocated | `lvextend -l +100%FREE` + `resize2fs` (§1) |
+| a published port is reachable despite a ufw rule | Docker's rules sit ahead of ufw's chains | delete the `ports:` entry; ufw cannot close it (§2) |
+| every container restarted overnight | `unattended-upgrades` updated docker-ce | `apt-mark hold` the docker packages (§2) |
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | finder: `Cannot reach qBittorrent at http://qbittorrent:8080` | namespace tenants have no DNS name | use `http://gluetun:8080` |
@@ -481,11 +601,12 @@ and matte-vm's SQLite file are not.
 | `502`/`530` from a public hostname | cloudflared cannot resolve or reach the service | service name and **container** port; is it in the same project? |
 | Cloudflare hostname 404s all assets | a Path prefix was set | leave Path empty, use a subdomain |
 | `docker compose exec qbittorrent curl ifconfig.me` shows the ISP IP | namespace sharing not in effect | check `network_mode`, recreate |
+| Ubuntu stuck at boot with no network | a USB SSD did not mount | `nofail` in `/etc/fstab` (§1) |
 | that same command hangs | gluetun killswitch, usually DNS | `docker compose logs gluetun` |
 | Plex shows half-finished files | downloading straight into a library | set the incomplete path (§8) |
+| finished torrents take minutes to "move" | incomplete dir is on a different filesystem than the category path | both must be on `/mnt/usb2` (§1) |
 | finder refuses a download for low space | free-space guard reading the wrong disk | default save path must be on ssd2 (§8) |
 | finder container exits at start | a `${VAR:?...}` has no value | fill it in `~/stack/.env` |
-| Pi stuck at boot with no network | an SSD did not mount | `nofail` in `/etc/fstab` (§1) |
 | disk full, no obvious cause | old build layers | `docker image prune -f`, `docker system df` |
 
 ## 14. Security posture
@@ -499,5 +620,65 @@ and matte-vm's SQLite file are not.
 - Secrets live in `~/stack/.env` (0600, gitignored). They are still visible to
   `docker inspect` and `docker compose config` — that is a local-access
   exposure, not a network one.
+- **`ufw` is not part of the posture.** Docker's rules run ahead of ufw's, so
+  enabling it does not close a published port (§2); what keeps the LAN-only
+  services LAN-only is that no router port is forwarded. Removing a `ports:`
+  entry is the real control.
+- Ubuntu's `unattended-upgrades` keeps the host patched, which is worth having;
+  if you `apt-mark hold` the docker packages to stop surprise restarts (§2),
+  updating them stays your job.
 - Rotate anything that has ever been pasted into a chat, an issue or a paste
   site: NordVPN service credentials, the tunnel token, `UI_PASSWORD`.
+
+## 15. Migrating from the Raspberry Pi
+
+The USB drives carry over untouched — only their mountpoints are renamed, which
+costs nothing on disk. Everything that has to move is small and lives in the
+backup tarball from §12.
+
+```bash
+# on the Pi
+cd ~/stack && docker compose down
+tar czf ~/pi-state.tgz \
+  -C / mnt/ssd/qbittorrent-config/qBittorrent \
+       mnt/ssd/prowlarr-config/config.xml \
+       mnt/ssd2/plex/config \
+  -C "$HOME" stack/.env git/matte-vm/data
+```
+
+Then on the new box, after §1–§3 and before first start (§7 step 5), unpack into
+the new locations — the directory names changed as well as the disk:
+
+| From (Pi) | To (mini PC) |
+| --- | --- |
+| `/mnt/ssd/qbittorrent-config` | `/srv/appdata/qbittorrent` |
+| `/mnt/ssd/prowlarr-config` | `/srv/appdata/prowlarr` |
+| `/mnt/ssd2/plex/config` | `/srv/appdata/plex/config` |
+| `~/git/matte-vm/data` | `/srv/appdata/matte-vm` |
+| `~/stack/.env` | `~/stack/.env`, plus the new `RENDER_GID` |
+| `/mnt/ssd` mountpoint | `/mnt/usb1` |
+| `/mnt/ssd2` mountpoint | `/mnt/usb2` |
+
+```bash
+sudo chown -R 1000:1000 /srv/appdata          # uids match, but check anyway
+```
+
+Four things to know about the moved state:
+
+- **Plex's library survives the architecture change.** The database is portable;
+  the library *paths* are what matter, and they are container-side (`/movies2`,
+  `/media/movies`), so they are unchanged. Plex will not rescan from scratch.
+- **Claim the new server anyway** if Plex shows as unclaimed — it is the same
+  machine identity in the config, so usually it does not, but keep a
+  `plex.tv/claim` token ready.
+- **qBittorrent's session comes with it.** Active torrents resume because the
+  container-side save paths (`/auto_movies`, `/auto_incomplete`) did not change.
+  Copy the config while the container is **stopped**, or it will be overwritten
+  on exit.
+- **Prowlarr's TorrentDay cookie may have expired** by the time you get here;
+  re-authenticating the indexer is quicker than debugging an empty search.
+
+Two leftovers in the app repos, since the stack now owns this documentation:
+`~/git/torrent_finder/deploy/HOMELAB.md` is a stale copy of this file and can go,
+and `deploy/raspberry-pi/` is now just misnamed (`qbt_password.py` in it still
+works — §8 links to it).

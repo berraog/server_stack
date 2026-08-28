@@ -5,11 +5,13 @@
 # service joins this project's default network and is reachable by service name
 # — which is how cloudflared below finds them.
 #
-# An include whose repo is not cloned yet fails the whole project, so clone the
-# app repos into ~/git first (README §7) or comment the line out.
+# Each fragment is owned by this repo and only *builds* from ~/git/<app>, so an
+# app repo never has to conform to the stack's rules (README §10). A build
+# context that is not cloned yet fails the whole project, so clone the app repos
+# into ~/git first (README §7) or comment the line out.
 include:
   - media/compose.yaml
-  - ../git/matte-vm/docker-compose.yml
+  - apps/matte-vm.yaml
 
 services:
   # The only cloudflared on the box. Every public hostname points at a service
