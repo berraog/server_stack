@@ -497,6 +497,46 @@ Kavita or Calibre-web for ebooks and magazines, Audiobookshelf for audiobooks.
 Adding one is §10, and it would mount `/mnt/active/books` read-only; nothing
 about the layout has to change first.
 
+**What to prefer when picking a release.** Hardware transcoding removes most of
+the reason to care about format. Two things it does not fix:
+
+- **Subtitles cost more than the codec does.** Burning in a subtitle forces a
+  transcode by definition — direct play is impossible once a frame has to be
+  redrawn. Text subtitles (SRT, ASS) are sent to the client and drawn there for
+  free; image subtitles (PGS from Blu-ray, VOBSUB from DVD) are the ones almost
+  no client can draw, so Plex burns them in. That is the whole difference
+  between a 1080p WEB-DL with an SRT, which direct plays, and the same film as a
+  Blu-ray remux with PGS, which transcodes every single time.
+
+  A true *hardsub* release — subtitles already painted into the picture, common
+  in anime rips — is not the same thing and costs nothing, because there is
+  nothing left for Plex to overlay.
+
+- **4K HDR is the case this box can still lose.** A 4K file the client direct
+  plays is free. A 4K HDR file that has to be transcoded also needs HDR→SDR tone
+  mapping, which is the most expensive thing Quick Sync does here and looks
+  washed out even when it keeps up. Prefer 1080p unless the client that matters
+  can direct play 4K HEVC.
+
+Beyond those, don't constrain anything: H.264 vs HEVC, MKV vs MP4, DTS vs AC3
+are all absorbed at 1080p without the N95 noticing, and `MAX_TORRENT_SIZE_GB=25`
+already keeps 4K remuxes and most 1080p ones out — which filters most PGS
+sources as a side effect.
+
+Three settings make it stick:
+
+| Where | Setting |
+| --- | --- |
+| Server → Transcoder | hardware acceleration **and** hardware-accelerated encoding on |
+| Each client → Playback | *Burn subtitles* → **Only image formats**, never *Always* |
+| Server → Agents / a subtitle agent | let Plex fetch SRTs, so an embedded PGS is never the only option |
+
+When something buffers, the dashboard says why rather than leaving you to guess:
+hover the active stream and it names Direct Play, Direct Stream or Transcode,
+marks an offloaded transcode `(hw)`, and gives the reason — `subtitle burn-in`
+and `container not supported` being the two you will actually see. Software
+transcoding of 1080p on this box is a misconfiguration, not a capacity limit.
+
 **Hardware transcoding (Quick Sync)** — mini PC only; the Pi has no hardware
 Plex can use, so on the `pi` branch expect direct play and stop here.
 
