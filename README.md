@@ -480,7 +480,10 @@ is the one file that cannot be reconstructed from the repos.
 # 1. clone
 mkdir -p ~/git && cd ~/git
 git clone git@github.com:<you>/matte-vm.git
-cd ~ && git clone git@github.com:<you>/stack.git       # this repo
+# This repo. The GitHub repo is `server_stack`, but the checkout must be
+# ~/stack: bin/autodeploy defaults to $HOME/stack and the systemd units name
+# /home/bjorngreen/stack. Hence the explicit target directory.
+cd ~ && git clone git@github.com:<you>/server_stack.git stack
 
 # 2. secrets
 cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.env
