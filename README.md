@@ -654,6 +654,31 @@ Radarr searches Prowlarr → qBittorrent downloads through the VPN → Radarr im
 and renames into `library/` → Plex scans → Jellyseerr marks it *Available*. No
 step in that chain is yours once the profile is right.
 
+**Requesting from inside Plex, via the watchlist.** Jellyseerr is its own site at
+its own hostname — there is no request button in the Plex apps, because Plex has
+no extension mechanism to put one there (§10). But Plex's own **Add to
+Watchlist** button, on anything in Plex's *Discover*, can be the trigger instead:
+
+*Settings → Users → <user> → Edit*, enable **Auto-Request** for movies and
+series. Jellyseerr then polls that user's Plex watchlist and raises a request for
+anything new in it.
+
+So the answer to "is there a button while browsing" is effectively yes, and it is
+Plex's own button — someone adds a film to their watchlist in the Plex app they
+already use, and it turns up in Radarr without them ever seeing Jellyseerr. Worth
+knowing what you give up by that route:
+
+| | Watchlist | Jellyseerr's own UI |
+| --- | --- | --- |
+| Where | inside the Plex app, no second site | `requests.bjorngreen.se`, signed in with their Plex account |
+| Latency | polled, so minutes not seconds | immediate |
+| TV granularity | the whole series | pick seasons |
+| Control | takes your defaults | quality profile, and the approval queue |
+
+Enable it for people you trust and leave the site for yourself and for anything
+that needs choosing. Either way nobody gets a new password: Jellyseerr signs
+people in with Plex, so access to the server *is* the account.
+
 ### Kometa (no UI — `docker compose logs kometa`)
 
 Kometa refuses to start without a config, so write one before first run:
