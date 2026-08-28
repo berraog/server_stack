@@ -23,6 +23,18 @@ services:
       - VPN_SERVICE_PROVIDER=nordvpn
       - VPN_TYPE=openvpn
       - OPENVPN_PROTOCOL=udp
+      #
+      # WireGuard instead, on the same NordVPN subscription: faster and lower
+      # latency, and no more OPENVPN_* below. It authenticates with a private
+      # key rather than the service credentials — generate a manual WireGuard
+      # config in Nord's dashboard and take the key from it. This does NOT gain
+      # you seeding; NordVPN forwards no port either way (README §8).
+      #   - VPN_TYPE=wireguard
+      #   - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:?set in ~/stack/.env}
+      #
+      # A provider that forwards a port, if seeding matters more than the
+      # remaining Nord subscription — see the table in README §8.
+      #   - FIREWALL_VPN_INPUT_PORTS=<the forwarded port>   # static-port providers
       # Carried over from the Pi, where it fixed fragmentation on this ISP.
       # Raise or drop it if throughput disappoints; revert if torrents stall.
       - VPN_MTU=1320

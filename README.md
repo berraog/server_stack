@@ -574,11 +574,45 @@ Outbound-only, you can still upload to leechers you happen to connect to, which
 on a private tracker's small, mostly-seeded swarms rounds to nothing. That
 matches the symptom exactly.
 
-**The fix is a provider that forwards a port**, and gluetun can obtain one
-automatically from ProtonVPN or Private Internet Access. It bundles well with the
-WireGuard switch (§2), since that is both faster than OpenVPN and the usual way
-these providers hand out a port. The shape, with gluetun's own documentation as
-the authority on exact variable names — they have moved between versions:
+**The NordVPN subscription is not wasted, and its P2P servers are not the answer
+either.** Those servers permit and route torrent traffic well, which is a
+different question from whether anyone can reach you; NordVPN offers no port
+forwarding on any plan or server type. What the subscription still does, and does
+fine:
+
+- keeps the traffic off your ISP's view of you
+- gives gluetun a killswitch, so nothing leaks when the tunnel drops
+- downloads at full speed, because *outbound* connections to seeders are all a
+  download needs
+
+Only seeding is missing, and the bonus system is already covering the ratio. So
+there is a legitimate do-nothing option here.
+
+**Free improvement either way: switch NordVPN to WireGuard.** Faster and lower
+latency than OpenVPN, no subscription change, and it is what you would be running
+after a provider change anyway. It needs a private key rather than a
+username/password — Nord's dashboard generates a manual WireGuard config, and
+gluetun's docs also cover pulling it with an API token. The commented block in
+`media/compose.yaml` has the shape.
+
+**If you want seeding, it is a provider change.** What matters is whether they
+forward a port and whether gluetun can ask for it automatically:
+
+| Provider | Port forwarding | gluetun handling |
+| --- | --- | --- |
+| NordVPN *(current)* | none, on any plan | — |
+| Private Internet Access | yes, all plans | native; gluetun negotiates the port and opens the firewall itself |
+| ProtonVPN | yes, on paid plans | native, same as PIA |
+| AirVPN | yes, and **static** — you pick it in their panel | no automation needed; set the same port in qBittorrent and in `FIREWALL_VPN_INPUT_PORTS` |
+| Mullvad | removed in 2023 | — |
+
+The rotating-port providers need the port pushed into qBittorrent on every
+reconnect; AirVPN's static port avoids that entirely, which is worth something
+against PIA being the cheapest. Either way, do it at Nord's renewal rather than
+paying two subscriptions to fix something the bonus points are already absorbing.
+
+The shape for a rotating port, with gluetun's own documentation as the authority
+on exact variable names — they have moved between versions:
 
 ```yaml
       - VPN_SERVICE_PROVIDER=protonvpn
