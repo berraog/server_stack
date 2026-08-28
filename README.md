@@ -3,8 +3,7 @@
 Everything needed to rebuild this server from a blank disk, plus how to change
 or extend it afterwards. The hardware is a BOSGAME mini PC (Intel N95) running
 Ubuntu Server 24.04. The Raspberry Pi it replaces is still a supported target
-on the `pi` branch; §15 covers restructuring the disks and moving between them. This file is the `stack` repo: the repo that
-describes the machine and, through `compose.yaml`, assembles it.
+on the `pi` branch; §15 covers restructuring the disks and moving between them.
 
 **What runs here**
 
