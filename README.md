@@ -654,19 +654,28 @@ Radarr searches Prowlarr → qBittorrent downloads through the VPN → Radarr im
 and renames into `library/` → Plex scans → Jellyseerr marks it *Available*. No
 step in that chain is yours once the profile is right.
 
-**Requesting from inside Plex, via the watchlist.** Jellyseerr is its own site at
-its own hostname — there is no request button in the Plex apps, because Plex has
-no extension mechanism to put one there (§10). But Plex's own **Add to
-Watchlist** button, on anything in Plex's *Discover*, can be the trigger instead:
+**The intended flow: the Plex watchlist.** Plex has no extension mechanism, so
+there is no request button in the Plex apps (§10). What there is, is Plex's own
+**Add to Watchlist** button on anything in *Discover* — and Jellyseerr can treat
+that as the request:
 
-*Settings → Users → <user> → Edit*, enable **Auto-Request** for movies and
-series. Jellyseerr then polls that user's Plex watchlist and raises a request for
-anything new in it.
+1. *Settings → Plex → Watchlist Sync* (or the equivalent under Plex settings):
+   enable it, and let it run once so the first poll lands.
+2. *Settings → Users → <user> → Edit*: enable **Auto-Request** for movies and
+   series, and set the quality profile and root folder those requests inherit.
 
-So the answer to "is there a button while browsing" is effectively yes, and it is
-Plex's own button — someone adds a film to their watchlist in the Plex app they
-already use, and it turns up in Radarr without them ever seeing Jellyseerr. Worth
-knowing what you give up by that route:
+Note this is **polling, not a webhook.** Jellyseerr asks the Plex API what is on
+each user's watchlist on a timer; nothing is pushed to it, and there is nothing to
+configure on the Plex side. Jellyseerr's own webhooks exist but point the other
+way — outbound notifications to Discord and the like.
+
+The one prerequisite that catches people: **each user must sign into Jellyseerr
+once.** Watchlists are per-Plex-account and reading one needs that account's
+token, which Jellyseerr only gets when the user completes the Plex sign-in. After
+that single visit they never need to return — they add to their watchlist in the
+Plex app and it appears in Radarr.
+
+**The site is the fallback**, for anything the watchlist route handles badly:
 
 | | Watchlist | Jellyseerr's own UI |
 | --- | --- | --- |
@@ -675,9 +684,26 @@ knowing what you give up by that route:
 | TV granularity | the whole series | pick seasons |
 | Control | takes your defaults | quality profile, and the approval queue |
 
-Enable it for people you trust and leave the site for yourself and for anything
-that needs choosing. Either way nobody gets a new password: Jellyseerr signs
-people in with Plex, so access to the server *is* the account.
+So: watchlist for everyone as the default path, and the site for yourself, for
+picking seasons, and for anyone whose taste needs an approval queue in front of
+it. Either way nobody gets a new password — Jellyseerr signs people in with Plex,
+so access to your server *is* the account.
+
+**Keeping the public side safe.** Plex sign-in is real authentication, not a
+token in a URL: it is OAuth against plex.tv, and Jellyseerr then checks the
+account against your server's user list, so a stranger with a valid Plex account
+still gets refused. Four things make that hold up on a public hostname:
+
+| Do | Why |
+| --- | --- |
+| *Settings → Users*: turn **local sign-in** off | leaves Plex OAuth as the only path and removes password brute-forcing as a category entirely |
+| Cloudflare → Security → **rate limiting** on the hostname, plus Bot Fight Mode | keeps the surface public for real users while making scanning and stuffing pointless; both are on the free plan |
+| Cloudflare → WAF: geo-restrict to the countries your users are actually in | cheap, and cuts most background noise |
+| Enable **2FA on your Plex account** | this is the highest-leverage item on the list: your Plex account is now the admin credential for the request system |
+
+Cloudflare Access on top is the strongest option and stays the right answer if
+you are the only requester — see §9 for why it stops being right the moment
+anyone else is.
 
 ### Kometa (no UI — `docker compose logs kometa`)
 
@@ -1024,6 +1050,15 @@ matte-vm's SQLite file are not.
   auth. Radarr, Sonarr, Bazarr and qBittorrent can all rewrite or delete the
   library, which is exactly why none of them has a hostname (§9) — the tunnel
   carries Jellyseerr and matte-vm only.
+- **Be honest about what "no hostname" buys.** Jellyseerr is the one internet-
+  facing app that holds Radarr's and Sonarr's API keys, and it sits on the same
+  docker network as them. Not being tunnelled stops anyone reaching Radarr
+  *directly*, but it does not contain a Jellyseerr compromise: code running in
+  that container can reach `radarr:7878` with a valid key, and Radarr can move
+  and delete files. Network isolation buys nothing here, because Jellyseerr has
+  to reach them to do its job. Keeping Jellyseerr patched is the actual control,
+  which is a reason to prefer a pinned tag you bump deliberately over discovering
+  a version six months old (§10).
 - qBittorrent's WebUI is inside the VPN namespace and reachable only on the LAN.
 - Secrets live in `~/stack/.env` (0600, gitignored). They are still visible to
   `docker inspect` and `docker compose config` — that is a local-access
@@ -1041,9 +1076,19 @@ matte-vm's SQLite file are not.
 
 ## 15. Migrating an existing setup
 
-Two separate jobs, and they can happen months apart: restructuring the disks
-into the layout in §1, and moving the box. Do the restructure first, on the Pi,
-so the new layout is proven before new hardware is in the way.
+Two separate jobs, and they can happen months apart: restructuring the disks into
+the layout in §1, and moving the box. Do the restructure first, on the Pi, so the
+new layout is proven before new hardware is in the way.
+
+| Subsection | What it covers |
+| --- | --- |
+| §15a | which branch you are on and how to keep it cheap to rebase |
+| **§15b** | **moving the data — mountpoints, directory renames, container state** |
+| §15c | telling the apps where it went: qBittorrent's paths, then Library Import |
+| §15d | carrying it all to the mini PC |
+
+§15b and §15c are one sitting, in that order: 15b moves bytes, 15c makes the
+applications agree with the result.
 
 ### 15a. Run this on the Pi now — the `pi` branch
 
