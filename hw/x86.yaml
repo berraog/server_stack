@@ -1,0 +1,14 @@
+# Overlay: Intel mini PC (N95 / Alder Lake-N or similar).
+# Selected in ~/stack/.env with
+#   COMPOSE_FILE=compose.yaml:hw/x86.yaml
+#
+# Quick Sync on the iGPU. The gid of the host's `render` group varies per
+# install, so it comes from .env:  getent group render | cut -d: -f3
+# Hardware transcoding itself needs Plex Pass; without it this is inert but
+# harmless. Enable in Plex under Settings > Transcoder (README §8).
+services:
+  plex:
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:?run: getent group render | cut -d: -f3}"

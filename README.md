@@ -2,7 +2,8 @@
 
 Everything needed to rebuild this server from a blank disk, plus how to change
 or extend it afterwards. The hardware is a BOSGAME mini PC (Intel N95) running
-Ubuntu Server 24.04; §15 covers moving here from the old Raspberry Pi. This file is the `stack` repo: the repo that
+Ubuntu Server 24.04. The Raspberry Pi it replaces is still a supported target
+on the `pi` branch; §15 covers restructuring the disks and moving between them. This file is the `stack` repo: the repo that
 describes the machine and, through `compose.yaml`, assembles it.
 
 **What runs here**
@@ -32,25 +33,54 @@ describes the machine and, through `compose.yaml`, assembles it.
 ## 1. Hardware, OS and disks
 
 - BOSGAME mini PC, Intel N95 (Alder Lake-N, x86_64), Ubuntu Server 24.04 LTS.
-- **Internal 500 GB SSD** — Ubuntu, Docker images, and `/srv/appdata`: every
-  container's config and database.
-- **Two USB SSDs**, bulk media only:
-  - `/mnt/usb1` — the hand-managed library, `media/{movies,tv,other}`
-  - `/mnt/usb2` — torrent-managed content, `share/torrents/{movies,tv,incomplete}`
+  The Raspberry Pi is still a supported target — see the `pi` branch and §15.
 - Wired ethernet. A static DHCP lease makes LAN URLs stable.
 
-Why state sits on the internal disk and media does not: Plex's library is a
-SQLite database bound by random writes, so its location is the one you can
-actually feel, while media is sequential, re-downloadable, and far too big for
-500 GB. The mountpoints say `usb`, not `ssd`, because internal-versus-USB is now
-the distinction that matters — all three disks are SSDs.
+Three disks, three jobs:
 
-**What deliberately stays on the USB drive: downloads in progress.** Two things
-depend on `share/torrents/incomplete` sharing a filesystem with the finished
-`movies`/`tv` folders — completion is a rename instead of a cross-disk copy, and
-the finder's free-space guard measures qBittorrent's *default* save path (§8).
-Move it to the internal SSD and `MIN_FREE_SPACE_GB` starts guarding 500 GB while
-the media drive silently fills.
+```
+/srv/appdata/          internal 500 GB SSD — all container state
+  gluetun/  qbittorrent/  prowlarr/  plex/{config,transcode}/  matte-vm/
+
+/mnt/active/           USB SSD — everything torrents touch
+  incomplete/          qBittorrent's default save path AND its incomplete path
+  movies/  tv/         finished, and what Plex reads
+  other/               the `other` category; no Plex library
+
+/mnt/archive/          USB SSD — content moved off active once it fills
+  movies/  tv/         read-only to every container
+```
+
+**Why state is internal and media is not.** Plex's library is a SQLite database
+bound by random writes, so its location is the one you can actually feel; media
+is sequential, re-downloadable, and far too big for 500 GB. All three disks are
+SSDs, so the mountpoints name each disk's *job* rather than its bus.
+
+**Why one disk holds everything torrents touch.** qBittorrent gets a single
+mount — `/mnt/active` as `/data` — so `incomplete/`, `movies/`, `tv/` and
+`other/` are unavoidably on one filesystem. Completing a torrent is then a
+rename instead of a copy, and it cannot regress into a copy later by someone
+pointing one category at the other disk. The finder's free-space guard reads
+qBittorrent's *default* save path, which is on this disk too, so
+`MIN_FREE_SPACE_GB` guards the disk that actually fills.
+
+That last point is why downloads stay on a USB drive rather than following the
+rest of the state onto the fast internal SSD: put `incomplete/` there and every
+completion becomes a cross-disk copy, while `MIN_FREE_SPACE_GB` starts guarding
+500 GB of system disk as the media drive silently fills.
+
+**Active and archive are roles, not brands.** Assign `active` to whichever drive
+has more free space. When it fills, move a finished folder across by hand:
+
+```bash
+mv /mnt/active/movies/"Some Film (2019)" /mnt/archive/movies/
+```
+
+Plex finds it again because both directories are in the same library. qBittorrent
+does not, so that torrent stops seeding — which is the intended trade and the
+reason it is a deliberate manual step rather than a script. Two disks is also the
+point at which a union filesystem (mergerfs) starts paying for itself; it is not
+worth the mount-order failure modes yet.
 
 ### The installer's LVM default will hide 400 GB
 
@@ -70,8 +100,8 @@ df -h /
 Get the UUIDs with `lsblk -f`, then in `/etc/fstab`:
 
 ```fstab
-UUID=xxxx-xxxx  /mnt/usb1  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
-UUID=yyyy-yyyy  /mnt/usb2  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+UUID=xxxx-xxxx  /mnt/active   ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+UUID=yyyy-yyyy  /mnt/archive  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
 ```
 
 `nofail` matters: without it a disconnected USB SSD leaves the box stuck in
@@ -79,8 +109,8 @@ emergency mode with no network, which on a headless machine means a keyboard
 hunt. `noatime` cuts pointless writes.
 
 ```bash
-sudo mkdir -p /mnt/usb1 /mnt/usb2
-sudo mount -a && df -h / /mnt/usb1 /mnt/usb2
+sudo mkdir -p /mnt/active /mnt/archive
+sudo mount -a && df -h / /mnt/active /mnt/archive
 ```
 
 ## 2. Dependencies
@@ -156,6 +186,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
   compose.yaml                    include: list + cloudflared
   media/compose.yaml              gluetun, qbittorrent, prowlarr, plex, finder
   apps/matte-vm.yaml              one fragment per standalone app
+  hw/x86.yaml, hw/pi.yaml         per-hardware overlays, picked in .env
   bin/autodeploy                  poll git, redeploy what changed
   autodeploy.conf                 repo -> service map
   systemd/autodeploy.{service,timer}   installed into /etc (§11)
@@ -166,7 +197,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
 ~/git/torrent_finder/             app repo: Dockerfile + app/
 ~/git/<next-app>/                 same shape
 /srv/appdata/<service>/           container state, internal SSD (§1)
-/mnt/usb1/, /mnt/usb2/            bulk media, USB drives (§1)
+/mnt/active/, /mnt/archive/       bulk media, USB drives (§1)
 ```
 
 Why apps stay outside `~/stack`: each one keeps a compose file that works on its
@@ -211,6 +242,30 @@ worth knowing before opening them:
   missing value fails at start instead of booting a broken service.
 - An `include:` whose repo is not cloned fails the whole project. Clone the app
   repos into `~/git` first (§7).
+
+### Hardware overlays
+
+Two things genuinely differ between the mini PC and the Pi — Plex's Quick Sync
+device and the VPN cipher — so they live in [`hw/`](hw) rather than in the files
+above, and `.env` picks one:
+
+```dotenv
+COMPOSE_FILE=compose.yaml:hw/x86.yaml    # or hw/pi.yaml
+```
+
+Compose reads `COMPOSE_FILE` from `.env`, so this is the only line that differs
+between the two machines and every other file stays byte-identical. Two
+consequences worth knowing:
+
+- **Never pass `-f`** to `docker compose` in `~/stack`. An explicit `-f`
+  overrides `COMPOSE_FILE` and silently drops the overlay — Plex would come up
+  without `/dev/dri` and transcode in software with no error anywhere. Run bare
+  `docker compose` from `~/stack`; `bin/autodeploy` does the same, which is why
+  it `cd`s instead of using `-f`.
+- Verify the overlay actually landed:
+  ```bash
+  cd ~/stack && docker compose config | grep -A2 'group_add\|/dev/dri'
+  ```
 
 ## 4. Host port registry
 
@@ -287,9 +342,9 @@ cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.
 # 3. data directories, owned by the container user
 #    internal SSD: container state.  USB drives: bulk media only.
 sudo mkdir -p /srv/appdata/{gluetun,qbittorrent,prowlarr,plex/config,plex/transcode,matte-vm}
-sudo mkdir -p /mnt/usb1/media/{movies,tv,other} \
-              /mnt/usb2/share/torrents/{movies,tv,incomplete}
-sudo chown -R 1000:1000 /srv/appdata /mnt/usb1 /mnt/usb2
+sudo mkdir -p /mnt/active/{incomplete,movies,tv,other} \
+              /mnt/archive/{movies,tv}
+sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
 
 # 4. sanity-check the assembled config before starting anything
 cd ~/stack
@@ -333,27 +388,24 @@ docker compose logs qbittorrent | grep -i "temporary password"
    the finder authenticates regardless of password changes. The WebUI is inside
    gluetun's namespace and not internet-reachable either way.
 3. *Options → Downloads*:
-   - **Default Save Path**: `/auto_incomplete`
-   - **Keep incomplete torrents in**: `/auto_incomplete`
+   - **Default Save Path**: `/data/incomplete`
+   - **Keep incomplete torrents in**: `/data/incomplete`
 4. *Categories* (right-click the sidebar → Add category):
 
    | Category | Save path | Host path | Plex sees |
    | --- | --- | --- | --- |
-   | `movies` | `/auto_movies` | `/mnt/usb2/share/torrents/movies` | `/movies2` |
-   | `tv` | `/auto_tv` | `/mnt/usb2/share/torrents/tv` | `/tv2` |
-   | `other` | `/downloads/other` | `/mnt/usb1/media/other` | `/media/other` |
+   | `movies` | `/data/movies` | `/mnt/active/movies` | `/active/movies` |
+   | `tv` | `/data/tv` | `/mnt/active/tv` | `/active/tv` |
+   | `other` | `/data/other` | `/mnt/active/other` | *(no library)* |
 
    The finder creates any that are missing. If you set them here instead, drop
    the `*_SAVE_PATH` variables and it follows whatever qBittorrent says.
 
-Why `/auto_incomplete` and not `/downloads`: incomplete files inside a Plex
-library get scanned half-written and pollute it, and the incomplete directory
-sits on the same filesystem as the final folders so completion is a rename
-instead of a cross-disk copy. It is also the disk the finder's free-space guard
-measures — qBittorrent reports free space for the **default save path**, so
-pointing that at `/mnt/usb2` keeps the reserve honest. This is why downloads in
-progress stayed on a USB drive rather than following the rest of the state onto
-the internal SSD (§1).
+Every path above is under the single `/data` mount, which is the whole active
+disk (§1). That is what makes completion a rename rather than a copy, and it is
+why `incomplete/` is a sibling of the library folders instead of living inside
+one: incomplete files inside a Plex library get scanned half-written and pollute
+it.
 
 **Lost the password entirely:** stop the container first (qBittorrent rewrites
 its config on exit), then either clear the hash to get a fresh temporary
@@ -383,9 +435,9 @@ resolved against the real qBittorrent:
 
 ```bash
 docker compose logs finder | grep 'qBittorrent category'
-# movie -> qBittorrent category 'movies' at /auto_movies
-# tv    -> qBittorrent category 'tv' at /auto_tv
-# other -> qBittorrent category 'other' at /downloads/other
+# movie -> qBittorrent category 'movies' at /data/movies
+# tv    -> qBittorrent category 'tv' at /data/tv
+# other -> qBittorrent category 'other' at /data/other
 ```
 
 `/downloads/movies` in that output means the `*_SAVE_PATH` variables never
@@ -397,12 +449,22 @@ deletes the files, which for a finished torrent is the copy Plex is serving.
 
 First run only: uncomment `PLEX_CLAIM`, put a fresh token from
 https://plex.tv/claim in `.env` (it expires in 4 minutes), start Plex, then
-remove it again. Libraries: Movies → `/movies2` and `/media/movies`, TV →
-`/tv2` and `/media/tv`, matching the mounts above.
+remove it again. Two libraries, each spanning both disks:
 
-**Hardware transcoding (Quick Sync).** The N95's iGPU does H.264 and HEVC in
-hardware, which the Pi could not do at all. The compose file already passes
-`/dev/dri` and joins the host's `render` group via `RENDER_GID`; the remaining
+| Library | Folders |
+| --- | --- |
+| Movies | `/active/movies`, `/archive/movies` |
+| TV Shows | `/active/tv`, `/archive/tv` |
+
+Both mounts are read-only, so Plex's own *delete media* does nothing. Deleting
+is the finder's job, via qBittorrent, which holds `/data` read-write. `other/`
+is deliberately outside any library.
+
+**Hardware transcoding (Quick Sync)** — mini PC only; the Pi has no hardware
+Plex can use, so on the `pi` branch expect direct play and stop here.
+
+The N95's iGPU does H.264 and HEVC in hardware. `hw/x86.yaml` passes `/dev/dri`
+and joins the host's `render` group via `RENDER_GID` (§3); the remaining
 steps are *Settings → Transcoder →* tick **Use hardware acceleration when
 available** (and HW-accelerated video encoding), which needs **Plex Pass**.
 Verify a transcode is actually offloaded:
@@ -415,7 +477,9 @@ sudo apt install intel-gpu-tools && sudo intel_gpu_top   # Video engine busy
 
 The dashboard marks an offloaded stream `(hw)`. `permission denied` on
 `renderD128` inside the container means `RENDER_GID` does not match
-`getent group render` on this host.
+`getent group render` on this host. If `/dev/dri` is missing *inside* the
+container while present on the host, `COMPOSE_FILE` is not selecting
+`hw/x86.yaml`, or something passed `-f` (§3).
 
 ## 9. Cloudflare
 
@@ -478,6 +542,8 @@ services:
       SOME_SECRET: "${NEWAPP_SECRET:?set in ~/stack/.env}"
     volumes:
       - /srv/appdata/<new-app>:/data   # internal SSD, outside the git checkout
+    # Media-adjacent apps mount /mnt/active or /mnt/archive read-only instead;
+    # only qBittorrent gets /mnt/active read-write.
     # ports:                           # only if you want LAN access
     #   - "80xx:8000"
     healthcheck:
@@ -530,6 +596,9 @@ changes restart real services, so pull those by hand (§12).
 
 ## 12. Routine operations
 
+Always from `~/stack` and always without `-f`, so `.env`'s `COMPOSE_FILE` picks
+up the hardware overlay (§3).
+
 ```bash
 cd ~/stack
 
@@ -550,7 +619,7 @@ docker compose pull gluetun && docker compose up -d gluetun
 # state
 docker compose ps
 docker compose logs -f --tail=100 finder
-df -h / /mnt/usb1 /mnt/usb2
+df -h / /mnt/active /mnt/archive
 docker system df
 ```
 
@@ -591,6 +660,7 @@ matte-vm's SQLite file are not.
 | a container's config directory is empty and never persists | Docker installed from **snap**; confinement blocks binds outside `/home` | `snap remove --purge docker`, reinstall from Docker's repo (§2) |
 | plex: `permission denied` opening `/dev/dri/renderD128` | `RENDER_GID` ≠ the host's render gid | `getent group render \| cut -d: -f3`, fix `.env`, recreate plex |
 | transcodes stay software-only despite `/dev/dri` | Plex Pass missing, or the Transcoder setting not ticked | §8 |
+| `/dev/dri` present on the host, absent in the container | `docker compose` was given `-f`, or `COMPOSE_FILE` omits `hw/x86.yaml` | run bare `docker compose` from `~/stack` (§3) |
 | `/` is ~100 GB on a 500 GB disk | Ubuntu's guided LVM left the VG unallocated | `lvextend -l +100%FREE` + `resize2fs` (§1) |
 | a published port is reachable despite a ufw rule | Docker's rules sit ahead of ufw's chains | delete the `ports:` entry; ufw cannot close it (§2) |
 | every container restarted overnight | `unattended-upgrades` updated docker-ce | `apt-mark hold` the docker packages (§2) |
@@ -604,7 +674,9 @@ matte-vm's SQLite file are not.
 | Ubuntu stuck at boot with no network | a USB SSD did not mount | `nofail` in `/etc/fstab` (§1) |
 | that same command hangs | gluetun killswitch, usually DNS | `docker compose logs gluetun` |
 | Plex shows half-finished files | downloading straight into a library | set the incomplete path (§8) |
-| finished torrents take minutes to "move" | incomplete dir is on a different filesystem than the category path | both must be on `/mnt/usb2` (§1) |
+| finished torrents take minutes to "move" | a category path escaped the `/data` mount | every category lives under `/data`, one disk (§1, §8) |
+| Plex cannot delete a file | `/active` and `/archive` are mounted read-only | intended; delete through the finder (§8) |
+| moved a folder to archive and seeding stopped | qBittorrent only mounts `/mnt/active` | expected — the trade described in §1 |
 | finder refuses a download for low space | free-space guard reading the wrong disk | default save path must be on ssd2 (§8) |
 | finder container exits at start | a `${VAR:?...}` has no value | fill it in `~/stack/.env` |
 | disk full, no obvious cause | old build layers | `docker image prune -f`, `docker system df` |
@@ -630,53 +702,130 @@ matte-vm's SQLite file are not.
 - Rotate anything that has ever been pasted into a chat, an issue or a paste
   site: NordVPN service credentials, the tunnel token, `UI_PASSWORD`.
 
-## 15. Migrating from the Raspberry Pi
+## 15. Migrating an existing setup
 
-The USB drives carry over untouched — only their mountpoints are renamed, which
-costs nothing on disk. Everything that has to move is small and lives in the
-backup tarball from §12.
+Two separate jobs, and they can happen months apart: restructuring the disks
+into the layout in §1, and moving the box. Do the restructure first, on the Pi,
+so the new layout is proven before new hardware is in the way.
+
+### 15a. Run this on the Pi now — the `pi` branch
+
+```bash
+cd ~/stack && git fetch && git checkout pi
+```
+
+The `pi` branch differs from `main` in this file only — the hardware, dependency,
+setup and troubleshooting sections — plus the default `COMPOSE_FILE` in
+`.env.example`. Every compose file is byte-identical, because the real hardware
+difference is `hw/pi.yaml`, selected by one line in `.env` (§3):
+
+```dotenv
+COMPOSE_FILE=compose.yaml:hw/pi.yaml
+```
+
+`RENDER_GID` stays blank there; nothing on the Pi reads it.
+
+### 15b. Restructuring the disks
+
+Nothing large moves. The drive that already holds the torrent folders becomes
+`active`, so the bulk of the data stays exactly where it is and only directory
+names and mountpoints change — both instant, both within one filesystem.
+
+Point the mountpoints at their new roles in `/etc/fstab` (§1), remount, then:
+
+```bash
+cd ~/stack && docker compose down
+
+# active  = the old /mnt/ssd2: already has incomplete/ and the torrent folders
+mv /mnt/active/share/torrents/movies      /mnt/active/movies
+mv /mnt/active/share/torrents/tv          /mnt/active/tv
+mv /mnt/active/share/torrents/incomplete  /mnt/active/incomplete
+rmdir /mnt/active/share/torrents /mnt/active/share
+
+# archive = the old /mnt/ssd: the hand-managed library
+mv /mnt/archive/media/movies  /mnt/archive/movies
+mv /mnt/archive/media/tv      /mnt/archive/tv
+
+# container state off both media drives and onto its own place
+mv /mnt/archive/qbittorrent-config  /srv/appdata/qbittorrent
+mv /mnt/archive/prowlarr-config     /srv/appdata/prowlarr
+mv /mnt/archive/gluetun             /srv/appdata/gluetun
+mv /mnt/active/plex/config          /srv/appdata/plex/config
+cp -r ~/git/matte-vm/data/.         /srv/appdata/matte-vm/
+
+# the one real copy: `other` was on the wrong disk (see below)
+mv /mnt/archive/media/other/* /mnt/active/other/ && rmdir /mnt/archive/media/other
+sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
+```
+
+That last one is a genuine cross-disk copy, and it is fixing a bug rather than
+creating one: `other` used to save to `/downloads/other` on the *library* disk
+while qBittorrent's incomplete directory sat on the *torrent* disk, so every
+completed `other` download was already being copied between disks — the exact
+thing §1 forbids, on the one category nobody watches. Under `/data` it cannot
+happen again.
+
+### 15c. Repointing qBittorrent's existing torrents
+
+The container-side paths changed (`/auto_movies` → `/data/movies`), so running
+torrents will report missing files until they are told where the data went.
+qBittorrent has no bulk rewrite, but per-category is close enough:
+
+1. Start the stack, open the WebUI, click a category in the sidebar.
+2. Select all (Ctrl-A) → right-click → **Set location** → the new path.
+3. It rechecks — fast, since the files are present and unmoved.
+
+Repeat for each category. If you would rather not touch the session at all, add
+compatibility mounts to `media/compose.yaml` so both path spellings resolve,
+migrate at leisure, then delete them:
+
+```yaml
+      - /mnt/active/movies:/auto_movies
+      - /mnt/active/tv:/auto_tv
+      - /mnt/active/incomplete:/auto_incomplete
+```
+
+The alternative is legitimate: let the Pi seed the old layout until it drains,
+and start the new box with a fresh session. Finished files are already in the
+library; only in-flight torrents are lost.
+
+### 15d. Moving to the mini PC
+
+By this point the layout is proven and the move is mostly cabling.
 
 ```bash
 # on the Pi
 cd ~/stack && docker compose down
-tar czf ~/pi-state.tgz \
-  -C / mnt/ssd/qbittorrent-config/qBittorrent \
-       mnt/ssd/prowlarr-config/config.xml \
-       mnt/ssd2/plex/config \
-  -C "$HOME" stack/.env git/matte-vm/data
+tar czf ~/state.tgz -C / srv/appdata -C "$HOME" stack/.env
 ```
 
-Then on the new box, after §1–§3 and before first start (§7 step 5), unpack into
-the new locations — the directory names changed as well as the disk:
+Then on the mini PC, after §1–§3 and before first start (§7 step 5):
 
-| From (Pi) | To (mini PC) |
+| Carry over | How |
 | --- | --- |
-| `/mnt/ssd/qbittorrent-config` | `/srv/appdata/qbittorrent` |
-| `/mnt/ssd/prowlarr-config` | `/srv/appdata/prowlarr` |
-| `/mnt/ssd2/plex/config` | `/srv/appdata/plex/config` |
-| `~/git/matte-vm/data` | `/srv/appdata/matte-vm` |
-| `~/stack/.env` | `~/stack/.env`, plus the new `RENDER_GID` |
-| `/mnt/ssd` mountpoint | `/mnt/usb1` |
-| `/mnt/ssd2` mountpoint | `/mnt/usb2` |
-
-```bash
-sudo chown -R 1000:1000 /srv/appdata          # uids match, but check anyway
-```
+| `/srv/appdata` | untar; `chown -R 1000:1000` afterwards |
+| `~/stack/.env` | untar, then set `COMPOSE_FILE=compose.yaml:hw/x86.yaml` and fill `RENDER_GID` |
+| both USB drives | unplug, replug, fix the UUIDs in `/etc/fstab` |
+| `~/git/*` | plain `git clone`; nothing in a checkout is state any more |
 
 Four things to know about the moved state:
 
-- **Plex's library survives the architecture change.** The database is portable;
-  the library *paths* are what matter, and they are container-side (`/movies2`,
-  `/media/movies`), so they are unchanged. Plex will not rescan from scratch.
-- **Claim the new server anyway** if Plex shows as unclaimed — it is the same
-  machine identity in the config, so usually it does not, but keep a
-  `plex.tv/claim` token ready.
-- **qBittorrent's session comes with it.** Active torrents resume because the
-  container-side save paths (`/auto_movies`, `/auto_incomplete`) did not change.
-  Copy the config while the container is **stopped**, or it will be overwritten
-  on exit.
-- **Prowlarr's TorrentDay cookie may have expired** by the time you get here;
-  re-authenticating the indexer is quicker than debugging an empty search.
+- **Plex's library survives the architecture change.** The database is portable,
+  and the library *paths* that matter are container-side (`/active/movies`,
+  `/archive/movies`), so they do not change with the hardware. No full rescan.
+- **Keep a `plex.tv/claim` token ready** in case the server shows as unclaimed;
+  usually the machine identity in the config carries over and it does not.
+- **Copy qBittorrent's config only while the container is stopped**, or it will
+  be overwritten on exit. Its session survives, because by now the container
+  paths are already the new ones.
+- **Prowlarr's TorrentDay cookie may have expired.** Re-authenticating the
+  indexer is quicker than debugging an empty search.
+
+When the Pi is retired, the branch goes with it:
+
+```bash
+git branch -d pi && git push origin --delete pi
+```
 
 Two leftovers in the app repos, since the stack now owns this documentation:
 `~/git/torrent_finder/deploy/HOMELAB.md` is a stale copy of this file and can go,

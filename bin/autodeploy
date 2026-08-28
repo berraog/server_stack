@@ -8,7 +8,11 @@ set -euo pipefail
 
 STACK="${STACK:-$HOME/stack}"
 CONF="$STACK/autodeploy.conf"
-COMPOSE=(docker compose -f "$STACK/compose.yaml")
+
+# Run from the stack directory with no -f, so COMPOSE_FILE in .env is honoured
+# and the host's hardware overlay (hw/*.yaml) is part of every deploy. Passing
+# -f would override COMPOSE_FILE and silently drop the overlay.
+cd "$STACK"
 
 # fd 3, not stdin: git and docker would otherwise eat the config file.
 while read -r repo service branch <&3; do
@@ -25,10 +29,10 @@ while read -r repo service branch <&3; do
   git -C "$repo" reset --hard "origin/$branch"
 
   # A broken fragment must never take the running stack down with it.
-  "${COMPOSE[@]}" config -q
+  docker compose config -q
   # --no-deps: without it a rebuild can recreate gluetun, which restarts
   # qBittorrent and Prowlarr and interrupts every active torrent.
-  "${COMPOSE[@]}" up -d --build --no-deps "$service"
+  docker compose up -d --build --no-deps "$service"
 done 3< "$CONF"
 
 docker image prune -f >/dev/null   # old layers fill a small disk fast

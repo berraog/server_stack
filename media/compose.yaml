@@ -1,14 +1,17 @@
 # Media stack: VPN plus everything that must sit behind it.
 #
-# qbittorrent and prowlarr use `network_mode: "service:gluetun"`, so they have
-# no network identity of their own — see README §5 before changing anything
-# here. In short: reach them at http://gluetun:<port>, never by their own name,
-# and they may never carry a `ports:` block.
+# Two rules govern this file; the rest is detail.
 #
-# Storage split (README §1): container state on the internal SSD under
-# /srv/appdata, bulk media on the USB drives. Downloads in progress stay on
-# /mnt/usb2 with the finished folders on purpose — same filesystem means
-# completion is a rename, and the finder's free-space guard measures that disk.
+# 1. qbittorrent and prowlarr use `network_mode: "service:gluetun"`, so they
+#    have no network identity of their own — reach them at http://gluetun:<port>
+#    and never give them a `ports:` block. README §5.
+# 2. qBittorrent sees exactly one mount, /data, which is the whole active disk.
+#    Incomplete and finished folders are therefore always on one filesystem, so
+#    completion is a rename rather than a copy — structurally, not by
+#    remembering to keep two paths in sync. README §1.
+#
+# Hardware-specific bits (Quick Sync, VPN cipher) live in ../hw/, selected by
+# COMPOSE_FILE in ~/stack/.env.
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
@@ -19,10 +22,6 @@ services:
       - VPN_SERVICE_PROVIDER=nordvpn
       - VPN_TYPE=openvpn
       - OPENVPN_PROTOCOL=udp
-      # No cipher pin: AES-128-GCM was a concession to the Pi's CPU. This box
-      # has AES-NI, so gluetun's default (AES-256-GCM) costs nothing. For real
-      # throughput the next step is VPN_TYPE=wireguard — see README §2.
-      #
       # Carried over from the Pi, where it fixed fragmentation on this ISP.
       # Raise or drop it if throughput disappoints; revert if torrents stall.
       - VPN_MTU=1320
@@ -61,10 +60,9 @@ services:
       - WEBUI_PORT=8080
     volumes:
       - /srv/appdata/qbittorrent:/config
-      - /mnt/usb1/media:/downloads
-      - /mnt/usb2/share/torrents/movies:/auto_movies
-      - /mnt/usb2/share/torrents/tv:/auto_tv
-      - /mnt/usb2/share/torrents/incomplete:/auto_incomplete
+      # One mount, the whole active disk — see rule 2 above. Inside it:
+      # incomplete/, movies/, tv/, other/.
+      - /mnt/active:/data
     restart: unless-stopped
 
   prowlarr:
@@ -85,6 +83,9 @@ services:
     build: ../../git/torrent_finder
     container_name: torrent-finder
     depends_on: [prowlarr]
+    # No media mount on purpose: the finder only ever talks to qBittorrent's and
+    # Prowlarr's APIs. These paths are what it tells qBittorrent to use, so they
+    # are qBittorrent's container paths, not the finder's.
     environment:
       - TZ=${TZ:-Europe/Stockholm}
       # gluetun, not prowlarr/qbittorrent — see README §5.
@@ -93,10 +94,9 @@ services:
       - QBITTORRENT_URL=http://gluetun:8080
       - QBITTORRENT_USERNAME=${QBITTORRENT_USERNAME:-admin}
       - QBITTORRENT_PASSWORD=${QBITTORRENT_PASSWORD:?set in ~/stack/.env}
-      # Container-side paths, unchanged by the move off the Pi.
-      - MOVIES_SAVE_PATH=/auto_movies
-      - TV_SAVE_PATH=/auto_tv
-      - OTHER_SAVE_PATH=/downloads/other
+      - MOVIES_SAVE_PATH=/data/movies
+      - TV_SAVE_PATH=/data/tv
+      - OTHER_SAVE_PATH=/data/other
       - MAX_TORRENT_SIZE_GB=${MAX_TORRENT_SIZE_GB:-25}
       - MIN_FREE_SPACE_GB=${MIN_FREE_SPACE_GB:-20}
       - INDEXER_NAME=TorrentDay
@@ -111,14 +111,6 @@ services:
     image: lscr.io/linuxserver/plex:latest
     container_name: plex
     network_mode: host          # needed for DLNA/GDM local discovery
-    # Quick Sync on the N95's iGPU. The gid of the host's `render` group varies
-    # per install, so it comes from .env: getent group render | cut -d: -f3
-    # Hardware transcoding itself needs Plex Pass; without it this is inert but
-    # harmless. Enable in Settings > Transcoder (README §8).
-    devices:
-      - /dev/dri:/dev/dri
-    group_add:
-      - "${RENDER_GID:?run: getent group render | cut -d: -f3}"
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
@@ -129,13 +121,16 @@ services:
       # - PLEX_CLAIM=${PLEX_CLAIM}
     volumes:
       - /srv/appdata/plex/config:/config
-      # Transcode scratch: heavy short-lived writes. Swap for the tmpfs below if
-      # RAM allows (needs headroom for every concurrent transcode; a full tmpfs
-      # fails playback rather than spilling to disk).
+      # Transcode scratch: heavy short-lived writes, so it belongs on the
+      # fastest disk. Swap for the tmpfs below if RAM allows — a full tmpfs
+      # fails playback rather than spilling to disk, so size it for every
+      # concurrent transcode.
       - /srv/appdata/plex/transcode:/transcode
-      - /mnt/usb1/media:/media
-      - /mnt/usb2/share/torrents/movies:/movies2
-      - /mnt/usb2/share/torrents/tv:/tv2
+      # Read-only: Plex writes metadata to /config, never to the library. This
+      # also means Plex's own "delete media" is inert — deleting is the finder's
+      # job, through qBittorrent, which has /data read-write.
+      - /mnt/active:/active:ro
+      - /mnt/archive:/archive:ro
     # tmpfs:
     #   - /transcode:size=4g
     restart: unless-stopped
