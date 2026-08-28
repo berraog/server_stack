@@ -683,8 +683,43 @@ this is not "add two apps", it is **choosing which one routes downloads**:
   choose-a-release step is missing. Keeps one router and one folder scheme, at
   the cost of writing it.
 
-Nothing here needs deciding today, and the layout in §1 does not change under
-any of the three.
+**The layout consequence, which is easy to miss.** Today qBittorrent saves a
+finished torrent straight into the folder Plex reads, and that is why §1 is as
+simple as it is. Sonarr and Radarr do not work that way: they *import* from the
+download folder into a library folder they name and organise themselves, and to
+avoid storing every file twice that import is a hardlink — which only works if
+both trees are on the same filesystem. So handing video to the *arr apps means
+splitting `/mnt/active` one level deeper:
+
+```
+/mnt/active/
+  incomplete/
+  downloads/movies/  downloads/tv/    qBittorrent's targets; keeps seeding
+  library/movies/    library/tv/      Radarr/Sonarr's output; what Plex reads
+  music/  books/  other/              unchanged — no *arr app owns these
+```
+
+One filesystem still, so hardlinks work and nothing is copied; but Plex's library
+folders move to `library/`, and `music/`/`books/`/`other/` stay exactly as they
+are. Worth knowing before starting, not after.
+
+**What is actually recommended.** Keep `torrent-finder` and narrow it, because
+the split we already have maps onto the division cleanly: Sonarr covers TV,
+Radarr covers movies, and **neither covers anything else** — Lidarr exists for
+music, the books equivalent was retired, and nothing automates magazines,
+software or a one-off grab. That is precisely `music/`, `books/` and `other/`.
+
+So: let the *arr apps own `movies` and `tv`, set `MANAGE_CATEGORIES=false` so the
+finder stops rewriting categories they own, and keep the finder as the manual
+tool for the long tail it is already good at. Deleting it would leave that tail
+with nothing.
+
+The one case for genuinely retiring it is if video is all you ever download. Then
+its movie/TV routing is the whole app, quality profiles do the release-picking
+better than reading badges by hand (§8), and keeping it around is a half-used
+service with an internet-facing login. Be honest about which of those you are.
+
+Nothing here needs deciding today.
 
 ## 9. Cloudflare
 
