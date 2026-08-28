@@ -1083,12 +1083,16 @@ new layout is proven before new hardware is in the way.
 | Subsection | What it covers |
 | --- | --- |
 | §15a | which branch you are on and how to keep it cheap to rebase |
-| **§15b** | **moving the data — mountpoints, directory renames, container state** |
+| **§15b** | **the disks: swap the mountpoints, then rename directories, then lift container state off them** |
 | §15c | telling the apps where it went: qBittorrent's paths, then Library Import |
 | §15d | carrying it all to the mini PC |
 
-§15b and §15c are one sitting, in that order: 15b moves bytes, 15c makes the
-applications agree with the result.
+§15b and §15c are one sitting, in that order — 15b moves bytes, 15c makes the
+applications agree with the result — and the stack stays down in between.
+
+Within §15b the mountpoint swap comes first and is not optional: `/mnt/active`
+and `/mnt/archive` do not exist yet, so every path in the steps after it is
+wrong until fstab has been changed and the drives remounted.
 
 ### 15a. Run this on the Pi now — the `pi` branch
 
@@ -1109,15 +1113,52 @@ COMPOSE_FILE=compose.yaml:hw/pi.yaml
 
 ### 15b. Restructuring the disks
 
-Nothing large moves. The drive that already holds the torrent folders becomes
-`active`, so the bulk of the data stays exactly where it is and only directory
-names and mountpoints change — both instant, both within one filesystem.
+Three steps, in this order. The first one is the one that is easy to skip, and
+nothing below works without it — every path in step 2 is a *new* mountpoint.
 
-Point the mountpoints at their new roles in `/etc/fstab` (§1), remount, then:
+**1. Swap the mountpoints.** Which drive becomes which is not arbitrary: `active`
+must be the one that already holds the torrent folders — the old `/mnt/ssd2` —
+because then the bulk of the data never moves at all.
 
 ```bash
-cd ~/stack && docker compose down
+cd ~/stack && docker compose down     # containers hold the mounts busy
+lsblk -f                              # note both UUIDs; fstab needs them
+```
 
+Now edit `/etc/fstab`: replace the two `/mnt/ssd` and `/mnt/ssd2` lines with the
+`/mnt/active` and `/mnt/archive` lines from §1. On the `pi` branch also add the
+`/srv/appdata` bind mount — it names `/mnt/archive` as its source, so it must
+come *after* that line, and it needs the `requires-mounts-for` option.
+
+```bash
+sudo umount /mnt/ssd /mnt/ssd2
+sudo mkdir -p /mnt/active /mnt/archive
+sudo mount -a
+findmnt /mnt/active /mnt/archive      # confirm both, before touching any data
+ls /mnt/active                        # expect share/  — the torrent drive
+ls /mnt/archive                       # expect media/  — the hand-managed one
+```
+
+If those two `ls` outputs are the other way round, the UUIDs are swapped in
+fstab. Fix that now; every command in step 2 assumes this mapping.
+
+`umount: target is busy` means something outside Docker holds the drive. `sudo
+fuser -vm /mnt/ssd2` names it — and given the `share/` directory, a Samba export
+is the likely answer, in which case its path in `/etc/samba/smb.conf` needs
+updating to match the new mountpoint too.
+
+```bash
+sudo rmdir /mnt/ssd /mnt/ssd2         # do not leave these behind
+```
+
+That last line matters more than it looks. An empty `/mnt/ssd` left in place is a
+directory on the root filesystem, so if a mount ever fails, everything that
+thought it was writing to the USB drive quietly fills the boot disk instead.
+
+**2. Move the data.** All renames within one filesystem, so all instant
+regardless of how much is in them.
+
+```bash
 # active = the old /mnt/ssd2. Its finished torrent folders become downloads/,
 # because that is where torrents seed from; Radarr and Sonarr will hardlink
 # them into library/ in 15c, which costs no space.
@@ -1133,8 +1174,11 @@ mkdir -p /mnt/active/library/{movies,tv} \
 # manages. Plex reads it directly and it stays as it is.
 mv /mnt/archive/media/movies  /mnt/archive/movies
 mv /mnt/archive/media/tv      /mnt/archive/tv
+```
 
-# container state off both media drives and onto its own place
+**3. Lift the container state off the media drives.**
+
+```bash
 mv /mnt/archive/qbittorrent-config  /srv/appdata/qbittorrent
 mv /mnt/archive/prowlarr-config     /srv/appdata/prowlarr
 mv /mnt/archive/gluetun             /srv/appdata/gluetun
@@ -1146,15 +1190,21 @@ mv /mnt/archive/media/other/* /mnt/active/other/ && rmdir /mnt/archive/media/oth
 sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
 ```
 
-That `mv` is a genuine cross-disk copy, and it is fixing a bug rather than
-creating one: `other` used to save to `/downloads/other` on the *library* disk
-while qBittorrent's incomplete directory sat on the *torrent* disk, so every
+On the Pi, `/srv/appdata` is the bind mount from step 1 — so `findmnt
+/srv/appdata` should show the USB device before you run any of these, or they
+land on the SD card and the whole point is lost.
+
+That `mv` of `other` is a genuine cross-disk copy, and it is fixing a bug rather
+than creating one: `other` used to save to `/downloads/other` on the *library*
+disk while qBittorrent's incomplete directory sat on the *torrent* disk, so every
 completed `other` download was already being copied between disks — the exact
 thing §1 forbids, on the one category nobody watches. Under `/data` it cannot
 happen again.
 
 Whatever is already in `other/` predates the split, so sort anything you want
 into `books/` by hand once; the rest can stay where it is.
+
+Do not start the stack yet — §15c is the other half of the same sitting.
 
 ### 15c. Handing the existing library to Radarr and Sonarr
 
