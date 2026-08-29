@@ -867,6 +867,47 @@ library, so they stay on the LAN (§9).
 6. *Settings → Profiles → Quality Definitions*: set the maximum sizes. This
    replaces the `MAX_TORRENT_SIZE_GB` guard the finder used to enforce.
 
+#### When a download completes and nothing gets imported
+
+**Prowlarr is not involved.** Its job ends the moment indexers are synced into
+Radarr and Sonarr; after that Radarr talks to the indexer directly, using the
+definition Prowlarr handed it, and to qBittorrent directly. Nothing about
+importing, renaming or moving passes through Prowlarr, so an import that never
+happens is a Radarr or Sonarr question.
+
+**The exception, and it looks exactly like this failure:** a torrent grabbed from
+**Prowlarr's own Search tab** is invisible to Radarr. Prowlarr sets its own
+category — whatever you picked on the grab — and Radarr only watches the
+`radarr` category for downloads *it* started. Nothing imports because as far as
+Radarr is concerned nothing was ever requested. Prowlarr's search is for the
+manual long tail (§8); anything Radarr should own must be searched **from
+Radarr**, under the film's own page or *Movies → Add New*.
+
+**Where the reason is written:** *Activity → Queue* in Radarr. A stuck import
+carries its explanation inline, and it is almost always one of these:
+
+| Queue says | Cause | Fix |
+| --- | --- | --- |
+| the download is not listed at all | Radarr never grabbed it — see the Prowlarr trap above, or the category is wrong | *Settings → Download Clients → qBittorrent → Category* must be `radarr`, and that category must exist in qBittorrent |
+| *No files found are eligible for import* | the release is a sample, an archive, or the wrong content | manual import, or blocklist and let Radarr try another release |
+| a path Radarr cannot access | qBittorrent and Radarr disagree about `/data` | both must mount `/mnt/active` at `/data` (§1). Leave *Remote Path Mappings* **empty** — filling it in hides the real fault |
+| nothing, but the file stays in `downloads/` | *Completed Download Handling* is off | *Settings → Download Clients → Completed Download Handling → Enable* |
+| an import error mentioning permissions | `/data/library/...` is not writable by the container user | `sudo chown -R 1000:1000 /mnt/active` |
+
+Prove the path agreement directly rather than reasoning about it — the same file
+must be visible from both sides at the same path:
+
+```bash
+cd ~/stack
+docker compose exec qbittorrent ls -la /data/downloads/movies
+docker compose exec radarr      ls -la /data/downloads/movies    # must match
+docker compose exec radarr      touch /data/library/movies/.probe && echo writable
+```
+
+If the first two disagree, that is the whole problem and no Radarr setting will
+fix it. If they agree and the import still fails, the Queue's own message is the
+next thing to read.
+
 **One guard did not survive the move.** The finder refused a download when free
 space fell below `MIN_FREE_SPACE_GB`, measured on the download disk. Radarr and
 Sonarr have a *Minimum Free Space* under *Media Management* (advanced), but it
@@ -1592,7 +1633,8 @@ matte-vm's SQLite file are not.
 | `qBittorrent login failed` | temporary password rotated on restart | permanent password + subnet whitelist (§8) |
 | upload is always 0 and the status bar shows *No direct connections* | NordVPN forwards no port, so nobody can connect in | structural — §8, "Why nothing uploads" |
 | torrents stop by themselves shortly after finishing | a qBittorrent seeding limit, or Radarr removing completed downloads | §8; on a tracker paying for uptime, both are worth turning off |
-| a download completes and Radarr never imports it | the download client and Radarr disagree about the path | both must mount `/mnt/active` as `/data` (§8); *Activity → Queue* names the path it tried |
+| a download completes and Radarr never imports it | usually one of five things, and *Activity → Queue* names which | §8, "When a download completes and nothing gets imported" |
+| a film grabbed from Prowlarr's Search tab never imports | Radarr only tracks downloads it started, in its own category | search from Radarr for anything Radarr should own (§8) |
 | imports copy instead of hardlinking, and the disk fills twice | `downloads/` and `library/` are on different filesystems, or *Use Hardlinks* is off | both live under `/mnt/active` (§1); confirm with `ls -l` showing link count 2 on an imported file |
 | Bazarr's library is empty | Radarr/Sonarr not connected, or connected with the wrong port | `radarr:7878`, `sonarr:8989` — bridge names, not `gluetun` (§8) |
 | Jellyseerr requests approve but nothing downloads | *Settings → Services* has no Radarr/Sonarr, or the wrong root folder | §8 |
