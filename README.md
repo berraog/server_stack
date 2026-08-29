@@ -1115,20 +1115,52 @@ watching the library the file landed in. Set *Settings → General → Applicati
 URL* to `https://requests.bjorngreen.se` at the same time, or Plex's OAuth
 redirect and every notification link points at the wrong place.
 
-**3. Wire the fulfilment**, which is what makes it more than an inbox —
-*Settings → Services → Add Radarr Server*, and again for Sonarr:
+**3. Wire the fulfilment**, which is what makes it more than an inbox.
+*Settings → Services → Add Radarr Server*, then again for Sonarr. Field names
+shift a little between Jellyseerr releases, but these are the values:
 
-| Field | Value |
-| --- | --- |
-| Hostname | `radarr` / `sonarr` — bridge services, so the names resolve (§5) |
-| Port | `7878` / `8989` |
-| API key | from that app's *Settings → General* |
-| Quality profile | the 1080p profile from §8, so requests inherit the format policy |
-| Root folder | `/data/library/movies` / `/data/library/tv` |
-| **Default Server** | **tick it.** Nothing routes without it, and the failure is silent: requests approve and then sit there |
+| Field | Radarr | Sonarr |
+| --- | --- | --- |
+| **Default Server** | **on** | **on** |
+| 4K Server | off | off |
+| Server Name | `Radarr` | `Sonarr` |
+| Hostname or IP | `radarr` | `sonarr` |
+| Port | `7878` | `8989` |
+| Use SSL | off | off |
+| API Key | Radarr → *Settings → General* | Sonarr → *Settings → General* |
+| URL Base | blank | blank |
+| Quality Profile | your 1080p profile (§8) | your 1080p profile |
+| Root Folder | `/data/library/movies` | `/data/library/tv` |
+| Minimum Availability | `Released` | *(not shown)* |
+| Season Folders | *(not shown)* | on |
+| External URL | `http://<pi-ip>:7878` | `http://<pi-ip>:8989` |
+| **Enable Scan** | **on** | **on** |
+| **Enable Automatic Search** | **on** | **on** |
 
-Leave the 4K server fields alone. They are for a second Radarr managing a
-separate 4K library, which §8's release policy deliberately does not have.
+Six of those are worth understanding rather than copying:
+
+- **Default Server** — nothing routes without it, and the failure is silent:
+  requests approve and then sit there forever.
+- **Hostname** is the service name, not `gluetun` and not an IP. Radarr and
+  Sonarr are ordinary bridge containers, so Jellyseerr resolves them directly
+  (§5).
+- **Quality Profile and Root Folder are dropdowns that stay empty until the
+  connection works.** That is your connection test: if they will not populate,
+  the API key or the hostname is wrong, and nothing below matters yet.
+- **Enable Automatic Search** — without it Radarr adds the film, monitors it, and
+  never looks for it. The request sits in Jellyseerr as approved and in Radarr as
+  wanted, with nothing in between, which is a confusing way to spend an evening.
+- **Minimum Availability `Released`** stops Radarr hunting for films that are not
+  out yet. Set it to `Announced` only if you want it grabbing the moment anything
+  appears, which on a private tracker mostly means grabbing cam rips.
+- **External URL** is what the *Open in Radarr* link points at. The internal name
+  `radarr` means nothing to your browser, so use the box's LAN address — or leave
+  it blank and accept a dead link.
+
+Leave the 4K fields alone. They are for a second Radarr managing a separate 4K
+library, which §8's release policy deliberately does not have. Sonarr may also
+offer separate anime profile and root folder settings; leave them matching the
+defaults unless you want anime filed apart.
 
 **4. Decide who can ask for what.** *Settings → Users → Import Plex Users* pulls
 in everyone who has access to your Plex server; they can also just sign in once
