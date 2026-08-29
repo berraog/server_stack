@@ -1401,9 +1401,34 @@ cd ~/stack && docker compose logs --tail=30 cloudflared
 | *Unauthorized* / *tunnel not found* | the tunnel was deleted in the dashboard, or the token belongs to a different one |
 | repeated *Couldn't connect to Cloudflare edge*, no exit | genuinely the network — this one does not restart-loop |
 
+Check the value without printing it:
+
+```bash
+cd ~/stack
+tok=$(grep '^CLOUDFLARE_TUNNEL_TOKEN=' .env | cut -d= -f2-)
+echo "length: ${#tok}"        # a real token is roughly 180-220 characters
+[[ "$tok" =~ ^[A-Za-z0-9+/=_-]+$ ]] && echo "charset OK" || echo "contains a space, quote or newline"
+```
+
+Short means truncated on paste. A charset failure means either surrounding quotes
+or — the usual one — the whole `docker run …` command was copied instead of just
+its last argument. Editors that hard-wrap will also insert a newline into a
+200-character line; paste it with `wrap` off, or write the line with `printf`
+rather than an editor.
+
 Re-copy it from *Zero Trust → Networks → Tunnels → your tunnel → Configure →
-Docker*: the token is the long string in the command shown there, not the whole
-command. Then `docker compose up -d cloudflared`.
+Docker*: the token is the long string at the end of the command shown there, not
+the command.
+
+Then **recreate, do not restart**:
+
+```bash
+docker compose up -d cloudflared
+```
+
+`docker compose restart` reuses the existing container, which still holds the old
+value — environment is baked in at creation. This applies to every `.env` change,
+not just this one, and is a reliable way to lose an hour.
 
 **This blocks remote access only.** Everything on the box is still reachable on
 the LAN at its own port, Jellyseerr included, and Plex sign-in works there — the
@@ -1570,7 +1595,9 @@ cd ~/stack
 # one app, after a push (what autodeploy does)
 docker compose up -d --build --no-deps app
 
-# infrastructure change (edited compose.yaml or .env)
+# infrastructure change (edited compose.yaml or .env) — `up -d`, never `restart`:
+# environment is baked in when a container is created, so restart keeps the old
+# values and the edit looks like it did nothing
 git pull && docker compose config -q && docker compose up -d
 
 # base image updates — media stack only, on purpose
@@ -1719,6 +1746,7 @@ matte-vm's SQLite file are not.
 | imports copy instead of hardlinking, and the disk fills twice | `downloads/` and `library/` are on different filesystems, or *Use Hardlinks* is off | both live under `/mnt/active` (§1); confirm with `ls -l` showing link count 2 on an imported file |
 | Bazarr's library is empty | Radarr/Sonarr not connected, or connected with the wrong port | `radarr:7878`, `sonarr:8989` — bridge names, not `gluetun` (§8) |
 | Jellyseerr requests approve but nothing downloads | *Settings → Services* has no Radarr/Sonarr, or the wrong root folder | §8 |
+| an `.env` change appears to have no effect | `docker compose restart` reuses the container, and environment is fixed at creation | `docker compose up -d <service>` to recreate it |
 | `cloudflared` restarts in a loop | it is exiting, not retrying — nearly always a bad or stale tunnel token | `docker compose logs cloudflared` names it (§9); the LAN is unaffected meanwhile |
 | `502`/`530` from a public hostname | cloudflared cannot resolve or reach the service | service name and **container** port; is it in the same project? |
 | Cloudflare hostname 404s all assets | a Path prefix was set | leave Path empty, use a subdomain |
