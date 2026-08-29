@@ -1765,38 +1765,79 @@ whichever directory the compose file sits in, so simply moving the file would
 silently point them at `~/stack/home/` — hence absolute `/srv/appdata` paths in
 `home/compose.yaml`, and hence a data move.
 
+**This is reversible, with one exception.** Everything is a bind mount, `rsync`
+copies rather than moves, and the old compose file stays where it is — so the old
+stack can be started again at any point. The exception is the Home Assistant
+*version*: HA migrates `.storage` and its database forward on first start with a
+newer image, and that migration does not roll back. So:
+
+> **Do not `docker compose pull homeassistant` before the first run.** The image
+> `ghcr.io/home-assistant/home-assistant:stable` is already on this machine, and
+> Docker reuses a local image rather than fetching a newer one unless told to.
+> Same image, same version, no migration, fully reversible. Pull it later, once
+> the new arrangement has proved itself and you have a backup.
+
+Take one anyway, from HA's own UI — *Settings → System → Backups → Create
+backup* — and a tarball of the directory, before touching anything:
+
+```bash
+tar czf ~/ha-backup-$(date +%F).tgz -C ~/docker homeassistant
+```
+
+Then:
+
 ```bash
 cd ~/docker/homeassistant && docker compose down     # release the ConBee and the ports
 cd ~/stack
 
-sudo mkdir -p /srv/appdata/{homeassistant,mosquitto/{config,data,log},zigbee2mqtt}
-sudo rsync -a ~/docker/homeassistant/config/          /srv/appdata/homeassistant/
-sudo rsync -a ~/docker/homeassistant/mosquitto/       /srv/appdata/mosquitto/
+sudo mkdir -p /srv/appdata/{homeassistant,mosquitto,zigbee2mqtt}
+sudo rsync -a ~/docker/homeassistant/config/           /srv/appdata/homeassistant/
+sudo rsync -a ~/docker/homeassistant/mosquitto/        /srv/appdata/mosquitto/
 sudo rsync -a ~/docker/homeassistant/zigbee2mqtt/data/ /srv/appdata/zigbee2mqtt/
-sudo chown -R 1000:1000 /srv/appdata/{homeassistant,mosquitto,zigbee2mqtt}
 
 docker compose up -d homeassistant mosquitto zigbee2mqtt
 docker compose logs -f homeassistant
 ```
 
-`rsync -a` rather than `mv`, so the originals stay put until the new stack has
-proved itself. Delete `~/docker/homeassistant` once it has.
+Three details in those commands that are not decoration:
+
+- **The trailing slashes matter.** `rsync -a src/ dst/` copies the *contents*
+  including dotfiles. Everything you care about — the entity registry, the device
+  registry, your dashboards, your auth tokens — lives in `config/.storage`, and a
+  `cp -r config/* …` would silently leave all of it behind. That is the one
+  mistake that loses the lights.
+- **`-a` preserves ownership, and you should let it.** Do **not** `chown` these
+  afterwards: the eclipse-mosquitto image runs as uid 1883, not 1000, so
+  flattening the directories to `1000:1000` breaks its ability to write its data
+  and log. If something does report a permission error, match what the old
+  directory had (`ls -ln ~/docker/homeassistant/mosquitto/data`) rather than
+  guessing.
+- **`down` first, always.** The ConBee can only be claimed by one container, and
+  1883, 8082 and 8123 can only be bound once.
 
 Four things to check, in this order, because each one masks the next:
 
 1. **Mosquitto accepted its config** — `docker compose logs mosquitto` should show
-   it opening the listener, not defaulting to localhost.
+   it opening the listener, not falling back to localhost-only.
 2. **Zigbee2MQTT found the stick and the broker** — its log names the adapter and
    then `Connected to MQTT server`.
-3. **Home Assistant came up on 8123** with your dashboards intact. It migrates
-   its config forward on first start with a newer image, and that migration does
-   not roll back, so this is the point of no return for the old directory.
+3. **Home Assistant came up on 8123** with your dashboards intact.
 4. **Devices are still there.** Zigbee pairings live in
-   `/srv/appdata/zigbee2mqtt/`, not in the stick, so if that directory came across
-   correctly nothing needs re-pairing.
+   `/srv/appdata/zigbee2mqtt/configuration.yaml` — the network key and PAN id in
+   particular — not in the stick, so if that file came across nothing needs
+   re-pairing.
 
-Then do the two conflict fixes in §8 — Plex's DLNA and `avahi-daemon` — or HA's
-discovery will be quietly broken in a way that looks like nothing at all.
+**If any of that goes wrong**, the old setup is untouched:
+
+```bash
+cd ~/stack && docker compose stop homeassistant mosquitto zigbee2mqtt
+cd ~/docker/homeassistant && docker compose up -d
+```
+
+Delete `~/docker/homeassistant` only after a few days of the new arrangement
+behaving. Then do the two conflict fixes in §8 — Plex's DLNA and `avahi-daemon`
+— or HA's discovery will be quietly broken in a way that looks like nothing at
+all.
 
 ### 15e. Moving to the mini PC
 
