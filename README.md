@@ -1301,9 +1301,35 @@ docker ps --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}'
 ```
 
 `COMPOSE_PROJECT_NAME=stack` in `.env` pins it regardless of the directory name,
-and is set in `.env.example` for exactly this reason. Adding it to an existing
-mismatched setup renames the project, so `docker compose down` under the *old*
-name first, or you will strand the previous containers.
+and is set in `.env.example` for exactly this reason.
+
+The symptom from the other side is a half-finished `up` that aborts on the first
+name already taken:
+
+```
+✔ Network stack_default  Created
+✘ Container jellyseerr   Conflict. The container name "/jellyseerr" is already in use
+```
+
+Every `container_name` here is fixed, so two projects cannot coexist — the second
+one claims a name the first already holds. Clearing it is safe: **nothing in this
+stack uses a named volume.** Every byte lives in a bind mount under `/srv/appdata`
+or `/mnt`, so removing containers destroys no state at all.
+
+```bash
+cd ~/stack
+docker ps -a --format 'table {{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Status}}'
+docker compose down --remove-orphans            # whatever this project half-created
+docker rm -f jellyseerr                         # and any other name that conflicts
+docker compose up -d
+```
+
+If the strays all carry an old project label, remove them in one go rather than
+by name:
+
+```bash
+docker rm -f $(docker ps -aq --filter label=com.docker.compose.project=<old-name>)
+```
 
 Restart blast radius, worth internalising:
 
