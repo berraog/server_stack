@@ -523,6 +523,46 @@ docker compose exec prowlarr curl -s ifconfig.me      # must match qBittorrent
 
 ## 8. Per-container configuration
 
+**Logging in, before anything else.** These apps do not share credentials and
+none of them ships a default pair, so there is nothing to look up — you create
+each one, once:
+
+| App | Where the first login comes from |
+| --- | --- |
+| Prowlarr, Radarr, Sonarr | **you invent it** on first visit. Each shows an *Authentication Required* setup screen before anything else and will not proceed until you pick a method and set a username and password. |
+| Bazarr | *Settings → General → Security*, off by default; set it there. |
+| qBittorrent | the **only** one with a generated password — `admin` plus a temporary one printed in the log on every start until you set a permanent one (below). |
+| Plex, Jellyseerr | your Plex account, via plex.tv. |
+
+That third row is the one that causes the confusion: qBittorrent's
+password-in-the-logs behaviour is specific to it, and looking for the equivalent
+in Prowlarr's logs will not find one.
+
+Four separate logins for four admin tools is tedious, and they are all LAN-only
+by design (§9), so *Authentication Required → Disabled for Local Addresses* is a
+defensible setting on the three \*arr apps. Understand what it means first:
+they treat any RFC1918 source as local, and behind Docker every LAN request
+arrives from a private address, so in practice it means **anyone on your network
+has full control** of your library. The containment is that the LAN is the
+boundary — nothing here is on the tunnel.
+
+**Lost one?** The \*arr apps keep their settings in `config.xml` next to their
+database, so recovery is a file edit rather than a reinstall:
+
+```bash
+cd ~/stack && docker compose stop prowlarr        # or radarr / sonarr
+sudo sed -i 's|<AuthenticationMethod>.*</AuthenticationMethod>|<AuthenticationMethod>None</AuthenticationMethod>|' \
+  /srv/appdata/prowlarr/config.xml
+docker compose start prowlarr                     # then set a new one in the UI
+```
+
+The same file holds the API key, which saves a click when wiring the apps to each
+other:
+
+```bash
+grep -o '<ApiKey>[^<]*' /srv/appdata/prowlarr/config.xml
+```
+
 ### qBittorrent (`http://<host>:8080`)
 
 linuxserver's image prints a **new temporary password on every start** until a
@@ -686,8 +726,9 @@ Steps 1–3 stand alone and are worth doing first. Steps 4–5 talk to other
 containers, so they need Radarr and Sonarr already running with their API keys,
 and qBittorrent already carrying a permanent password (§8) — come back for them.
 
-**1. Note the API key.** *Settings → General → Security*. Radarr, Sonarr and
-Jellyseerr each want it, entered in their own UIs.
+**1. Note the API key.** *Settings → General → Security*, or straight out of
+`config.xml` (§8 opening). Radarr, Sonarr and Jellyseerr each want it, entered in
+their own UIs.
 
 **2. Add TorrentDay.** *Indexers → Add Indexer → TorrentDay*. It authenticates
 with a browser cookie rather than a password, and the reliable way to get one is
