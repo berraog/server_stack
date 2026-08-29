@@ -444,13 +444,25 @@ none either — it never listens.
 `qbittorrent` and `prowlarr` use `network_mode: "service:gluetun"`, so they have
 **no network identity of their own**:
 
-- `http://qbittorrent:8080` never resolves. Use **`http://gluetun:8080`**.
-- `http://prowlarr:9696` never resolves. Use **`http://gluetun:9696`**.
-- That applies to every app configured to reach them, which is now most of the
-  box: Radarr and Sonarr point their download client and indexer proxy at
-  `gluetun`, and so does Prowlarr's own download client. Radarr, Sonarr and
-  Bazarr are ordinary bridge services themselves, so *their* names do resolve —
-  `http://radarr:7878` from Bazarr or Jellyseerr is correct.
+**The address depends on which side you are asking from**, and this is the part
+that is easy to get wrong:
+
+| From | To | Address |
+| --- | --- | --- |
+| a bridge service — Radarr, Sonarr, Bazarr, Jellyseerr | qBittorrent | `http://gluetun:8080` |
+| a bridge service | Prowlarr | `http://gluetun:9696` |
+| **Prowlarr** (inside the namespace) | **qBittorrent** | **`http://localhost:8080`** |
+| anywhere | Radarr, Sonarr, Bazarr | their own names — ordinary bridge services |
+
+- `http://qbittorrent:8080` and `http://prowlarr:9696` never resolve from
+  anywhere. Neither name exists.
+- **Prowlarr and qBittorrent are already on the same loopback**, so between those
+  two the answer is `localhost` — not a workaround but the correct address, and
+  the only one that needs no DNS at all.
+- Using `gluetun` from *inside* the namespace does not work either, even though
+  it looks symmetrical: gluetun replaces the container's resolver with its own
+  DNS-over-TLS proxy, so Docker's service-name resolution at `127.0.0.11` is gone
+  for its tenants. The name is looked up upstream and does not exist.
 - Neither service may have a `ports:` block — publishing a port on a container
   that borrows another's namespace fails with *"conflicting options: port
   publishing and the container type network mode"*. All their ports go on
@@ -776,10 +788,23 @@ will use to call back to Prowlarr, so it must be gluetun's. Indexers then sync
 outward automatically, and Radarr's *Settings → Indexers* fills in by itself.
 
 **5. Add qBittorrent as a download client.** *Settings → Download Clients → Add
-→ qBittorrent*, host `gluetun`, port `8080`, the WebUI login from §8. This is
-what lets the *Search* tab actually grab something, which is how the occasional
-ebook or audiobook gets downloaded now — set the category to `books` or `other`
-on the grab.
+→ qBittorrent*, host **`localhost`**, port `8080`, the WebUI login from §8.
+
+Not `gluetun` — Prowlarr and qBittorrent share a network namespace, so they are
+already on the same loopback, and `gluetun` does not resolve from inside it
+(§5). Radarr and Sonarr *do* use `gluetun` for the same client, because they are
+ordinary bridge containers reaching in from outside. Same download client, two
+different addresses, depending on which side is asking.
+
+One consequence of using loopback: the subnet whitelist from §8 covers
+`172.16.0.0/12`, and `127.0.0.1` is not in it, so Prowlarr needs the real
+username and password. Alternatively tick *Bypass authentication for clients on
+localhost* in qBittorrent, which then also covers anything else inside the
+namespace.
+
+This is what lets the *Search* tab actually grab something, which is how the
+occasional ebook or audiobook gets downloaded now — set the category to `books`
+or `other` on the grab.
 
 That last step is the whole manual workflow. Prowlarr's search is not as pleasant
 as a purpose-built UI, but it is already here, already authenticated, and already
@@ -1449,6 +1474,7 @@ matte-vm's SQLite file are not.
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
+| Prowlarr's qBittorrent client fails against host `gluetun` | Prowlarr is *inside* that namespace, and gluetun's DNS proxy replaced Docker's resolver | host `localhost`, port 8080 (§5) |
 | HA discovers nothing it used to, no error anywhere | Plex's DLNA holds UDP 1900, or `avahi-daemon` holds 5353 | §8 — disable Plex's DLNA server, and avahi if unused |
 | Zigbee2MQTT cannot open the adapter | the ConBee is on a different port, or deCONZ is running and holds it | `ls -l /dev/serial/by-id/`; the two are mutually exclusive (§8) |
 | MQTT clients connect and are refused | mosquitto 2.x defaults to localhost-only, anonymous denied | its `config/mosquitto.conf` did not come across (§15d) |

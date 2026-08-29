@@ -4,7 +4,8 @@
 #
 # 1. qbittorrent and prowlarr use `network_mode: "service:gluetun"`, so they
 #    have no network identity of their own — reach them at http://gluetun:<port>
-#    and never give them a `ports:` block. README §5.
+#    *from a bridge container*, at http://localhost:<port> from each other, and
+#    never give them a `ports:` block. README §5.
 # 2. Everything that touches media mounts /mnt/active at the SAME container
 #    path, /data — qBittorrent here, Radarr/Sonarr/Bazarr in arr.yaml, Plex
 #    read-only below. One mount means completion is a rename and an *arr import
