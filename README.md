@@ -1355,6 +1355,29 @@ Jellyseerr's own Plex sign-in be the lock — it can accept nothing more dangero
 than a request. Set *Settings → General → Application URL* to the public
 hostname either way, or Plex's OAuth redirect and the notification links break.
 
+**If `cloudflared` restart-loops**, it is exiting rather than retrying, and that
+almost always means the token — a connectivity problem makes it log failures and
+keep trying instead. The log says which:
+
+```bash
+cd ~/stack && docker compose logs --tail=30 cloudflared
+```
+
+| Log says | Cause |
+| --- | --- |
+| *Provided Tunnel token is not valid* | truncated on paste, or a stray newline. The token is one long base64 string with no spaces |
+| *Unauthorized* / *tunnel not found* | the tunnel was deleted in the dashboard, or the token belongs to a different one |
+| repeated *Couldn't connect to Cloudflare edge*, no exit | genuinely the network — this one does not restart-loop |
+
+Re-copy it from *Zero Trust → Networks → Tunnels → your tunnel → Configure →
+Docker*: the token is the long string in the command shown there, not the whole
+command. Then `docker compose up -d cloudflared`.
+
+**This blocks remote access only.** Everything on the box is still reachable on
+the LAN at its own port, Jellyseerr included, and Plex sign-in works there — the
+tunnel is how other people reach it, not how it works. Do not wait on cloudflared
+to finish setting anything up.
+
 ```bash
 curl -sI https://requests.bjorngreen.se | head -1
 # 401 = the app answered and refused for lack of credentials (healthy)
@@ -1664,6 +1687,7 @@ matte-vm's SQLite file are not.
 | imports copy instead of hardlinking, and the disk fills twice | `downloads/` and `library/` are on different filesystems, or *Use Hardlinks* is off | both live under `/mnt/active` (§1); confirm with `ls -l` showing link count 2 on an imported file |
 | Bazarr's library is empty | Radarr/Sonarr not connected, or connected with the wrong port | `radarr:7878`, `sonarr:8989` — bridge names, not `gluetun` (§8) |
 | Jellyseerr requests approve but nothing downloads | *Settings → Services* has no Radarr/Sonarr, or the wrong root folder | §8 |
+| `cloudflared` restarts in a loop | it is exiting, not retrying — nearly always a bad or stale tunnel token | `docker compose logs cloudflared` names it (§9); the LAN is unaffected meanwhile |
 | `502`/`530` from a public hostname | cloudflared cannot resolve or reach the service | service name and **container** port; is it in the same project? |
 | Cloudflare hostname 404s all assets | a Path prefix was set | leave Path empty, use a subdomain |
 | `docker compose exec qbittorrent curl ifconfig.me` shows the ISP IP | namespace sharing not in effect | check `network_mode`, recreate |
