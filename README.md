@@ -1474,6 +1474,8 @@ matte-vm's SQLite file are not.
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
+| one service is unreachable while its namespace-mate answers | that container was never created — an earlier `up` aborted partway on a name conflict | `docker compose ps -a`; §12 clears the conflict, then `up -d` again |
+| every app looks factory-fresh after a `git pull` | the appdata regrouping moved the mount paths, so the containers are pointed at new empty directories | **nothing is lost** — the data is still at `/srv/appdata/<service>`; do the regrouping in §15b |
 | Prowlarr's qBittorrent client fails against host `gluetun` | Prowlarr is *inside* that namespace, and gluetun's DNS proxy replaced Docker's resolver | host `localhost`, port 8080 (§5) |
 | HA discovers nothing it used to, no error anywhere | Plex's DLNA holds UDP 1900, or `avahi-daemon` holds 5353 | §8 — disable Plex's DLNA server, and avahi if unused |
 | Zigbee2MQTT cannot open the adapter | the ConBee is on a different port, or deCONZ is running and holds it | `ls -l /dev/serial/by-id/`; the two are mutually exclusive (§8) |
