@@ -682,23 +682,63 @@ uptime there is a reason not to.
 Prowlarr is the indexer proxy: it holds the TorrentDay credentials once, and
 pushes the indexer definition out to Radarr and Sonarr so they never hold it.
 
-1. *Settings → General → Security*: note the API key. Radarr, Sonarr and
-   Jellyseerr each need it, entered in their own UIs.
-2. *Indexers → Add Indexer → TorrentDay*, authenticate with your account cookie.
-3. Run one search from Prowlarr's own *Search* tab before trusting it from code.
-4. *Settings → Apps → Add → Radarr*, then again for *Sonarr*. Server addresses
-   are `http://radarr:7878` and `http://sonarr:8989`; the Prowlarr server address
-   it asks for in return is `http://gluetun:9696`, **not** `http://prowlarr:9696`
-   (§5). Indexers then sync outward automatically.
-5. *Settings → Download Clients → Add → qBittorrent*, host `gluetun`, port
-   `8080`. This is what makes step 3's *Search* tab able to grab, which is how
-   the occasional ebook or audiobook gets downloaded now — set the category to
-   `books` or `other` on the grab.
+Steps 1–3 stand alone and are worth doing first. Steps 4–5 talk to other
+containers, so they need Radarr and Sonarr already running with their API keys,
+and qBittorrent already carrying a permanent password (§8) — come back for them.
+
+**1. Note the API key.** *Settings → General → Security*. Radarr, Sonarr and
+Jellyseerr each want it, entered in their own UIs.
+
+**2. Add TorrentDay.** *Indexers → Add Indexer → TorrentDay*. It authenticates
+with a browser cookie rather than a password, and the reliable way to get one is
+from a request rather than the cookie jar:
+
+1. Log into TorrentDay in a browser, and **do not log out afterwards** — that
+   invalidates the cookie you are about to copy.
+2. F12 → *Network* → reload the page → click any request to the site →
+   *Request Headers* → copy the entire value of the `Cookie:` header.
+3. Paste the whole string into Prowlarr's **Cookie** field. It looks like
+   `uid=...; pass=...; ...` and every part matters.
+
+Copying individual cookies out of the *Application*/*Storage* tab works too but
+is easy to get wrong; the request header is already formatted the way Prowlarr
+wants it. Hit **Test** before saving.
+
+**3. Search once from Prowlarr itself.** The *Search* tab, any common title.
+This separates "the indexer works" from "the wiring to Radarr works", and you
+want to know which you are debugging later.
+
+**4. Point Prowlarr at Radarr and Sonarr.** *Settings → Apps → Add → Radarr*,
+then again for *Sonarr*. Two addresses, and they are not symmetric:
+
+| Field | Value | Why |
+| --- | --- | --- |
+| Radarr / Sonarr Server | `http://radarr:7878`, `http://sonarr:8989` | ordinary bridge services, so their own names resolve |
+| Prowlarr Server | `http://gluetun:9696` | Prowlarr has no network identity of its own — §5 |
+| API Key | from that app's *Settings → General* | |
+
+Getting the second one wrong is the usual mistake: it is the address *Radarr*
+will use to call back to Prowlarr, so it must be gluetun's. Indexers then sync
+outward automatically, and Radarr's *Settings → Indexers* fills in by itself.
+
+**5. Add qBittorrent as a download client.** *Settings → Download Clients → Add
+→ qBittorrent*, host `gluetun`, port `8080`, the WebUI login from §8. This is
+what lets the *Search* tab actually grab something, which is how the occasional
+ebook or audiobook gets downloaded now — set the category to `books` or `other`
+on the grab.
 
 That last step is the whole manual workflow. Prowlarr's search is not as pleasant
 as a purpose-built UI, but it is already here, already authenticated, and already
 inside the VPN namespace, and the alternative was maintaining an app for
 something that happens a few times a year.
+
+**Two things that will fail later, not now.** The cookie expires — silently, weeks
+in, and Prowlarr disables an indexer after enough consecutive failures, so
+"nothing finds anything any more" usually means repeating step 2. And if TorrentDay
+puts Cloudflare in front of itself, a cookie minted in your browser is bound to
+your browser's address and will not work from the VPN exit; the standard answer is
+a FlareSolverr container, added per §10 and pointed at from *Settings → Indexers →
+Indexer Proxies*.
 
 ### Radarr (`http://<host>:7878`) and Sonarr (`http://<host>:8989`)
 
@@ -1236,6 +1276,9 @@ matte-vm's SQLite file are not.
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
+| Prowlarr worked for weeks, then finds nothing | the TorrentDay cookie expired and the indexer was auto-disabled | redo §8 step 2; check *Indexers* for a disabled one |
+| Prowlarr's indexer test returns a Cloudflare challenge | the cookie is bound to your browser's IP, not the VPN exit | FlareSolverr as an indexer proxy (§8) |
+| Prowlarr cannot reach `radarr:7878` when adding the App | gluetun's killswitch is dropping outbound traffic to the docker network | add `FIREWALL_OUTBOUND_SUBNETS=<the compose network subnet>` to gluetun; `docker network inspect stack_default` names it |
 | `qBittorrent login failed` | temporary password rotated on restart | permanent password + subnet whitelist (§8) |
 | upload is always 0 and the status bar shows *No direct connections* | NordVPN forwards no port, so nobody can connect in | structural — §8, "Why nothing uploads" |
 | torrents stop by themselves shortly after finishing | a qBittorrent seeding limit, or Radarr removing completed downloads | §8; on a tracker paying for uptime, both are worth turning off |
