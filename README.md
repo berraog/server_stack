@@ -877,23 +877,69 @@ disk considerably faster than choosing releases by hand did.
 ### Bazarr (`http://<host>:6767`)
 
 Bazarr has no library of its own: it asks Radarr and Sonarr what exists and
-where, which is why it could not run here until now.
+where, which is why it could not run here until now. Set it up after both of
+those have imported your library, or it will connect to two empty catalogues and
+look broken.
 
-1. *Settings → Radarr*: address `radarr`, port `7878`, Radarr's API key. Same
-   for *Settings → Sonarr* with `sonarr` and `8989`. These are bridge services,
-   so their own names resolve — no `gluetun` here (§5).
-2. *Settings → Languages*: define a profile (say Swedish, then English) and set
-   it as default for both series and movies.
-3. *Settings → Providers*: add OpenSubtitles or similar. An account is free and
-   the anonymous limits are low enough to look broken.
-4. *Settings → Subtitles*: leave **Use embedded subtitles** on so it does not
-   fetch what a file already carries as text.
+**1. Connect Radarr and Sonarr.** *Settings → Radarr* — address `radarr`, port
+`7878`, Radarr's API key; then *Settings → Sonarr* with `sonarr` and `8989`.
+These are ordinary bridge services, so their own names resolve; no `gluetun`
+here (§5).
 
-Once this works, turn Plex's own subtitle agent back off — two things fetching
-subtitles for the same file produce duplicates that are tedious to unpick. Bazarr
-writing `.srt` files next to the video is also strictly better for the burn-in
-problem than an embedded PGS: a sidecar SRT is text, so clients render it and
-nothing transcodes (§8).
+**Leave the path mapping table empty.** It exists because Bazarr is usually told
+a path by Radarr that means something different inside Bazarr's own container,
+and filling it in wrongly is the classic way to break this. It is unnecessary
+here for a specific reason: qBittorrent, Radarr, Sonarr and Bazarr all mount
+`/mnt/active` at the same container path, `/data` (§1), so a path Radarr reports
+is a path Bazarr can open, unchanged. If Bazarr reports files it cannot find,
+that mount agreement has broken — do not paper over it with a mapping.
+
+**2. Build a language profile.** Three steps that people conflate, and nothing
+downloads until all three are done:
+
+1. *Settings → Languages → Languages Filter*: enable the languages you care
+   about. This only makes them selectable.
+2. *Languages Profiles → Add*: an ordered list — Swedish first, English second —
+   with a **cutoff** at the point where Bazarr should stop looking. Decide here
+   whether to accept *hearing impaired* and *forced* variants; HI subtitles are
+   often the only ones available and are visibly noisier to read.
+3. *Default Settings*: assign that profile as the default for Series and for
+   Movies, separately.
+
+**3. Apply the profile to what already exists.** This is the step that gets
+missed. The default only applies to *newly added* items, so a library imported
+before Bazarr existed has no profile and Bazarr will sit there doing nothing:
+
+- *Series* → select all → **Mass Edit** → assign the profile.
+- *Movies* → the same.
+
+**4. Providers.** *Settings → Providers*. OpenSubtitles.com needs a free account
+and has a daily download quota — anonymous use is limited enough to look like a
+malfunction. Add a second provider such as Podnapisi so one quota does not stall
+everything. The list changes as providers die, so treat whatever Bazarr offers
+today as the menu.
+
+**5. Subtitle behaviour.** *Settings → Subtitles*, four settings worth setting
+deliberately:
+
+| Setting | Why |
+| --- | --- |
+| **Use embedded subtitles** — on | do not fetch what the file already carries as text |
+| **Minimum score** | lower finds more and syncs worse. Start at the default and lower it only for a language that keeps coming up empty |
+| **Automatic subtitle synchronization** | fixes the offset that makes a technically-correct subtitle useless |
+| **Upgrade previously downloaded subtitles** | lets a poor early match be replaced later, which matters when a release lands before its subtitles do |
+
+Leave subtitles saved **alongside the video**, not embedded. That is the whole
+point for this box: a sidecar `.srt` is text, so Plex hands it to the client and
+nothing transcodes, where an embedded PGS forces burn-in (§8).
+
+Bazarr writes those `.srt` files into `/data/library/...`, so it holds `/data`
+read-write for the same reason Radarr does.
+
+**Then turn Plex's own subtitle agent back off.** Two things fetching subtitles
+for the same file produce duplicates that are tedious to unpick, and Bazarr is
+much better at it — more providers, scoring, per-language rules, and upgrades
+over time.
 
 ### Plex (`http://<host>:32400/web`)
 
@@ -990,12 +1036,19 @@ cd ~/stack && docker compose up -d jellyseerr
 docker compose logs -f jellyseerr        # a permissions complaint here means the chown
 ```
 
-Then in the setup wizard: choose **Plex**, and for the server address use
+**1. The wizard.** Choose **Plex**, and for the server address use
 `host.docker.internal` port `32400` — not `plex`, which does not resolve (§10).
-Sign in with your Plex account, import the Movies and TV libraries, and set
-*Settings → General → Application URL* to `https://requests.bjorngreen.se`.
+Sign in with your Plex account; the account that completes the wizard becomes the
+Jellyseerr owner.
 
-Then wire the fulfilment, which is what makes it more than an inbox —
+**2. Enable the libraries and scan.** *Settings → Plex → Libraries*: tick Movies
+and TV Shows, then **Start Scan**. Skipping this is why availability detection
+appears not to work — Jellyseerr only knows a request is fulfilled if it is
+watching the library the file landed in. Set *Settings → General → Application
+URL* to `https://requests.bjorngreen.se` at the same time, or Plex's OAuth
+redirect and every notification link points at the wrong place.
+
+**3. Wire the fulfilment**, which is what makes it more than an inbox —
 *Settings → Services → Add Radarr Server*, and again for Sonarr:
 
 | Field | Value |
@@ -1005,13 +1058,36 @@ Then wire the fulfilment, which is what makes it more than an inbox —
 | API key | from that app's *Settings → General* |
 | Quality profile | the 1080p profile from §8, so requests inherit the format policy |
 | Root folder | `/data/library/movies` / `/data/library/tv` |
+| **Default Server** | **tick it.** Nothing routes without it, and the failure is silent: requests approve and then sit there |
+
+Leave the 4K server fields alone. They are for a second Radarr managing a
+separate 4K library, which §8's release policy deliberately does not have.
+
+**4. Decide who can ask for what.** *Settings → Users → Import Plex Users* pulls
+in everyone who has access to your Plex server; they can also just sign in once
+and appear. Then per user, or as the global default under *Settings → Users*:
+
+| Permission | What it means here |
+| --- | --- |
+| Request | can ask. The baseline. |
+| **Auto-Approve** | their requests go straight to Radarr with no queue. Right for you and for people whose taste you do not need to review |
+| Request quota | requests per week or day. The only real guard against one person filling `/mnt/active` |
+| Manage Requests | can approve other people's — keep it to yourself |
+
+The quota is worth setting even for trusted users, because the free-space guard
+that torrent-finder used to enforce is gone (§8) and automation fills a disk
+quickly.
+
+**5. Get told when something is requested.** *Settings → Notifications* — Discord
+or email is enough. Without it, a request that needs approval waits for you to
+happen to open the site, which rather defeats the point of the inbox.
 
 A request now goes: someone asks → you approve (or auto-approve trusted users) →
 Radarr searches Prowlarr → qBittorrent downloads through the VPN → Radarr imports
 and renames into `library/` → Plex scans → Jellyseerr marks it *Available*. No
 step in that chain is yours once the profile is right.
 
-**The intended flow: the Plex watchlist.** Plex has no extension mechanism, so
+**6. The intended flow: the Plex watchlist.** Plex has no extension mechanism, so
 there is no request button in the Plex apps (§10). What there is, is Plex's own
 **Add to Watchlist** button on anything in *Discover* — and Jellyseerr can treat
 that as the request:
