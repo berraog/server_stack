@@ -588,6 +588,32 @@ other:
 grep -o '<ApiKey>[^<]*' /srv/appdata/media/prowlarr/config.xml
 ```
 
+**Adding something to watch.** Three ways in, and only the last one involves
+Radarr or Sonarr directly:
+
+| Route | Where | Good for |
+| --- | --- | --- |
+| **Plex watchlist** | inside the Plex app you already use | the default. Add to Watchlist and it arrives; no second site, nothing to learn (§8) |
+| **Jellyseerr** | `requests.bjorngreen.se`, from anywhere | one search box covering both films and series, and the only route other people get |
+| Radarr / Sonarr | LAN only | when you want *that specific release* |
+
+**You do not search Radarr and Sonarr separately in normal use.** Jellyseerr
+searches one TMDB catalogue covering both, works out whether a result is a film
+or a series, and hands it to the right one — that is what it is for, and it is
+why it is the only one of the three on the tunnel.
+
+Going to Radarr or Sonarr directly is for control rather than discovery. Their
+**Interactive Search** — the magnifying glass on a film or season — lists the
+actual releases with size, seeders and quality, and lets you take one. That is
+the tool for overriding a bad automatic grab, or forcing a 1080p WEB-DL when the
+profile picked something that burns in subtitles (§8). Jellyseerr cannot do this:
+it requests, and Radarr chooses per profile.
+
+**Do not put Radarr or Sonarr on the tunnel to unify them.** They cannot share a
+hostname anyway — §9 covers why a path prefix breaks these apps — and combining
+them is precisely the problem Jellyseerr already solves, without exposing two
+applications that can delete your library (§14).
+
 ### qBittorrent (`http://<host>:8080`)
 
 linuxserver's image prints a **new temporary password on every start** until a
