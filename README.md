@@ -1265,12 +1265,45 @@ docker image prune -f
 # gluetun / VPN change: recreates its tenants, interrupts torrents
 docker compose pull gluetun && docker compose up -d gluetun
 
+# recreate everything — see below for why plain `up -d` often does nothing
+docker compose up -d --force-recreate
+
 # state
 docker compose ps
 docker compose logs -f --tail=100 radarr
 df -h / /mnt/active /mnt/archive
 docker system df
 ```
+
+**When `up -d` reports nothing but the network.** `docker compose up -d` is
+idempotent: it recreates a container only when its definition or image has
+actually changed, so on an unchanged stack it leaves everything running and says
+so. If you want new containers regardless, that is what `--force-recreate` is
+for, and there is a ladder of increasing severity:
+
+| Command | Does |
+| --- | --- |
+| `docker compose up -d` | recreates only what changed |
+| `docker compose up -d --force-recreate` | recreates every container from the current config |
+| `docker compose up -d --force-recreate --build` | the same, rebuilding images from the `build:` contexts too |
+| `docker compose pull && docker compose up -d --force-recreate` | also takes new upstream images first |
+| `docker compose down && docker compose up -d` | removes containers *and* the network before rebuilding. Bind mounts under `/srv/appdata` and `/mnt` are untouched — no data is at risk — but everything stops at once, including the tunnel. |
+
+**If instead it created a network and then did nothing useful, check the project
+name.** Compose derives it from the directory, and the GitHub repo is
+`server_stack` while the checkout is supposed to be `~/stack` (§7). Cloned to the
+wrong name, you get a *second* project — `server_stack_default` alongside
+`stack_default` — that owns none of the running containers:
+
+```bash
+docker compose ls                                  # projects compose knows about
+docker ps --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}'
+```
+
+`COMPOSE_PROJECT_NAME=stack` in `.env` pins it regardless of the directory name,
+and is set in `.env.example` for exactly this reason. Adding it to an existing
+mismatched setup renames the project, so `docker compose down` under the *old*
+name first, or you will strand the previous containers.
 
 Restart blast radius, worth internalising:
 
@@ -1319,6 +1352,8 @@ matte-vm's SQLite file are not.
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
 | Prowlarr worked for weeks, then finds nothing | the TorrentDay cookie expired and the indexer was auto-disabled | redo §8 step 2; check *Indexers* for a disabled one |
 | Prowlarr's indexer test returns a Cloudflare challenge | the cookie is bound to your browser's IP, not the VPN exit | FlareSolverr as an indexer proxy (§8) |
+| `up -d` creates a network and reports no containers | the checkout directory name differs from the running containers' compose project | `COMPOSE_PROJECT_NAME=stack` in `.env` (§12) |
+| `Conflict. The container name "/gluetun" is already in use` | same cause, seen from the other side: a second project trying to claim fixed `container_name`s | as above; `docker compose down` under the old project first |
 | Prowlarr cannot reach `radarr:7878` when adding the App | gluetun's killswitch is dropping outbound traffic to the docker network | add `FIREWALL_OUTBOUND_SUBNETS=<the compose network subnet>` to gluetun; `docker network inspect stack_default` names it |
 | `qBittorrent login failed` | temporary password rotated on restart | permanent password + subnet whitelist (§8) |
 | upload is always 0 and the status bar shows *No direct connections* | NordVPN forwards no port, so nobody can connect in | structural — §8, "Why nothing uploads" |
