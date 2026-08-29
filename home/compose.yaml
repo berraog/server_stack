@@ -20,12 +20,19 @@ services:
     # mDNS/zeroconf, DHCP sniffing) only works on the host's own interface.
     # This is why it collides with Plex's DLNA on UDP 1900 — README §8.
     network_mode: host
+    # Worth testing whether this is still needed. It exists for direct hardware
+    # access — Bluetooth adapters, USB radios — and the only radio on this box
+    # is the ConBee, which belongs to zigbee2mqtt rather than to HA. Drop it,
+    # restart, and see what stops working; §14 explains why it is worth the
+    # experiment.
     privileged: true
     environment:
+      # TZ alone is enough. The /etc/localtime bind that usually accompanies it
+      # is a holdover from images that ignored TZ, and binds a host path whose
+      # location is not guaranteed across distributions.
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
-      - /srv/appdata/homeassistant:/config
-      - /etc/localtime:/etc/localtime:ro
+      - /srv/appdata/home/homeassistant:/config
     restart: unless-stopped
 
   mosquitto:
@@ -34,12 +41,14 @@ services:
     environment:
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
+      # One mount for all three of the image's directories — config/, data/ and
+      # log/ live under /mosquitto, so binding the parent replaces three lines
+      # with one and keeps them together for backup.
+      #
       # mosquitto 2.x listens on localhost only and refuses anonymous clients
-      # until told otherwise, so config/mosquitto.conf is required, not
-      # optional. Carry the existing one over — README §15.
-      - /srv/appdata/mosquitto/config:/mosquitto/config
-      - /srv/appdata/mosquitto/data:/mosquitto/data
-      - /srv/appdata/mosquitto/log:/mosquitto/log
+      # until told otherwise, so config/mosquitto.conf inside it is required,
+      # not optional. Carry the existing one over — README §15d.
+      - /srv/appdata/home/mosquitto:/mosquitto
     ports:
       - "1883:1883"   # MQTT — published so host-networked HA can reach it
       - "9001:9001"   # MQTT over websockets
@@ -52,7 +61,7 @@ services:
     environment:
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
-      - /srv/appdata/zigbee2mqtt:/app/data
+      - /srv/appdata/home/zigbee2mqtt:/app/data
     devices:
       - /dev/serial/by-id/usb-dresden_elektronik_ingenieurtechnik_GmbH_ConBee_II_DE2656890-if00:/dev/ttyACM0
     ports:
@@ -62,5 +71,5 @@ services:
   # deCONZ is the alternative to zigbee2mqtt for the same ConBee II, and the two
   # are mutually exclusive twice over: one stick cannot be claimed by both, and
   # both want host port 8082. If you ever switch, comment out zigbee2mqtt first
-  # and put deCONZ's state under /srv/appdata/deconz rather than in a home
+  # and put deCONZ's state under /srv/appdata/home/deconz rather than in a home
   # directory (README §1).

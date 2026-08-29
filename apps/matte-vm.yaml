@@ -13,7 +13,7 @@ services:
     volumes:
       # On the internal SSD, and outside the git checkout that autodeploy runs
       # `git reset --hard` on. The app's own compose file uses ./data.
-      - /srv/appdata/matte-vm:/data
+      - /srv/appdata/apps/matte-vm:/data
     ports:
       - "8000:8000"
     healthcheck:

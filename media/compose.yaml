@@ -36,7 +36,7 @@ services:
       - TZ=${TZ:-Europe/Stockholm}
       - UPDATER_PERIOD=24h
     volumes:
-      - /srv/appdata/gluetun:/gluetun
+      - /srv/appdata/media/gluetun:/gluetun
     # EVERY port for every container in gluetun's namespace is published here.
     #
     # These make the services reachable from the LAN. Publishing 6881 does NOT
@@ -69,7 +69,7 @@ services:
       - TZ=${TZ:-Europe/Stockholm}
       - WEBUI_PORT=8080
     volumes:
-      - /srv/appdata/qbittorrent:/config
+      - /srv/appdata/media/qbittorrent:/config
       # One mount, the whole active disk — see rule 2 above. Inside it:
       # incomplete/, downloads/{movies,tv}/, library/{movies,tv}/, books/,
       # other/. Radarr and Sonarr set their own categories and save paths here;
@@ -88,7 +88,7 @@ services:
       - PGID=${PGID:-1000}
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
-      - /srv/appdata/prowlarr:/config
+      - /srv/appdata/media/prowlarr:/config
     restart: unless-stopped
 
   plex:
@@ -104,12 +104,12 @@ services:
       # minutes — https://plex.tv/claim
       # - PLEX_CLAIM=${PLEX_CLAIM}
     volumes:
-      - /srv/appdata/plex/config:/config
+      - /srv/appdata/media/plex/config:/config
       # Transcode scratch: heavy short-lived writes, so it belongs on the
       # fastest disk. Swap for the tmpfs below if RAM allows — a full tmpfs
       # fails playback rather than spilling to disk, so size it for every
       # concurrent transcode.
-      - /srv/appdata/plex/transcode:/transcode
+      - /srv/appdata/media/plex/transcode:/transcode
       # The same /data spelling as everything else, read-only: Plex writes
       # metadata to /config, never to the library. Libraries point at
       # /data/library/movies and /data/library/tv (README §8).

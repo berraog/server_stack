@@ -29,7 +29,7 @@ services:
       LOG_LEVEL: info
     volumes:
       # Its SQLite database and settings. chown to 1000:1000 before first start.
-      - /srv/appdata/jellyseerr:/app/config
+      - /srv/appdata/apps/jellyseerr:/app/config
     ports:
       - "5055:5055"    # LAN only; the tunnel uses the container port directly
     healthcheck:

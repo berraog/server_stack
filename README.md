@@ -48,10 +48,14 @@ Three disks, three jobs:
 | `/mnt/archive` | **500 GB USB** (the old `/mnt/ssd`) | content aged off active; read-only to every container |
 
 ```
-/srv/appdata/          internal 500 GB SSD — all container state
-  gluetun/  qbittorrent/  prowlarr/  radarr/  sonarr/  bazarr/
-  jellyseerr/  kometa/  plex/{config,transcode}/  matte-vm/
-  homeassistant/  mosquitto/{config,data,log}/  zigbee2mqtt/
+/srv/appdata/          internal 500 GB SSD — all container state, grouped to
+  media/               mirror the compose fragments: one directory per fragment
+    gluetun/  qbittorrent/  prowlarr/  radarr/  sonarr/  bazarr/
+    plex/{config,transcode}/
+  home/
+    homeassistant/  mosquitto/  zigbee2mqtt/
+  apps/
+    jellyseerr/  kometa/  matte-vm/
 
 /mnt/active/           1 TB USB — everything torrents touch
   incomplete/          qBittorrent's default save path AND its incomplete path
@@ -330,7 +334,8 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
 ~/git/matte-vm/                   app repo: Dockerfile + its own compose file
 ~/git/torrent_finder/             retired from the stack (§8), repo kept
 ~/git/<next-app>/                 same shape
-/srv/appdata/<service>/           container state, internal SSD (§1)
+/srv/appdata/<group>/<service>/   container state, internal SSD; <group> is the
+                                  compose fragment's own directory (§1)
 /mnt/active/, /mnt/archive/       bulk media, USB drives (§1)
 ```
 
@@ -497,9 +502,9 @@ cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.
 
 # 3. data directories, owned by the container user
 #    internal SSD: container state.  USB drives: bulk media only.
-sudo mkdir -p /srv/appdata/{gluetun,qbittorrent,prowlarr,plex/config,plex/transcode}
-sudo mkdir -p /srv/appdata/{radarr,sonarr,bazarr,jellyseerr,kometa,matte-vm}
-sudo mkdir -p /srv/appdata/{homeassistant,mosquitto/{config,data,log},zigbee2mqtt}
+sudo mkdir -p /srv/appdata/media/{gluetun,qbittorrent,prowlarr,radarr,sonarr,bazarr,plex/{config,transcode}}
+sudo mkdir -p /srv/appdata/home/{homeassistant,mosquitto,zigbee2mqtt}
+sudo mkdir -p /srv/appdata/apps/{jellyseerr,kometa,matte-vm}
 sudo mkdir -p /mnt/active/{incomplete,downloads/{movies,tv},library/{movies,tv}} \
               /mnt/active/{books/{audiobooks,ebooks,magazines},other} \
               /mnt/archive/{movies,tv}
@@ -560,7 +565,7 @@ database, so recovery is a file edit rather than a reinstall:
 ```bash
 cd ~/stack && docker compose stop prowlarr        # or radarr / sonarr
 sudo sed -i 's|<AuthenticationMethod>.*</AuthenticationMethod>|<AuthenticationMethod>None</AuthenticationMethod>|' \
-  /srv/appdata/prowlarr/config.xml
+  /srv/appdata/media/prowlarr/config.xml
 docker compose start prowlarr                     # then set a new one in the UI
 ```
 
@@ -568,7 +573,7 @@ The same file holds the API key, which saves a click when wiring the apps to eac
 other:
 
 ```bash
-grep -o '<ApiKey>[^<]*' /srv/appdata/prowlarr/config.xml
+grep -o '<ApiKey>[^<]*' /srv/appdata/media/prowlarr/config.xml
 ```
 
 ### qBittorrent (`http://<host>:8080`)
@@ -621,8 +626,8 @@ password, or write a known one:
 
 ```bash
 cd ~/stack && docker compose stop qbittorrent
-cp /srv/appdata/qbittorrent/qBittorrent/qBittorrent.conf{,.bak}
-sed -i '/^WebUI\\Password_PBKDF2=/d' /srv/appdata/qbittorrent/qBittorrent/qBittorrent.conf
+cp /srv/appdata/media/qbittorrent/qBittorrent/qBittorrent.conf{,.bak}
+sed -i '/^WebUI\\Password_PBKDF2=/d' /srv/appdata/media/qbittorrent/qBittorrent/qBittorrent.conf
 docker compose up -d qbittorrent
 docker compose logs qbittorrent | grep -i "temporary password"
 # or: python3 ~/git/torrent_finder/deploy/raspberry-pi/qbt_password.py
@@ -929,7 +934,7 @@ container while present on the host, `COMPOSE_FILE` is not selecting
 Create the config directory first, or the container starts and cannot write:
 
 ```bash
-sudo mkdir -p /srv/appdata/jellyseerr && sudo chown -R 1000:1000 /srv/appdata/jellyseerr
+sudo mkdir -p /srv/appdata/apps/jellyseerr && sudo chown -R 1000:1000 /srv/appdata/apps/jellyseerr
 cd ~/stack && docker compose up -d jellyseerr
 docker compose logs -f jellyseerr        # a permissions complaint here means the chown
 ```
@@ -1011,11 +1016,11 @@ anyone else is.
 Kometa refuses to start without a config, so write one before first run:
 
 ```bash
-sudo mkdir -p /srv/appdata/kometa && sudo chown -R 1000:1000 /srv/appdata/kometa
+sudo mkdir -p /srv/appdata/apps/kometa && sudo chown -R 1000:1000 /srv/appdata/apps/kometa
 # the image ships a fully commented template; take it and edit
 docker run --rm kometateam/kometa:latest cat /config/config.yml.template \
-  | sudo tee /srv/appdata/kometa/config.yml >/dev/null
-sudo nano /srv/appdata/kometa/config.yml
+  | sudo tee /srv/appdata/apps/kometa/config.yml >/dev/null
+sudo nano /srv/appdata/apps/kometa/config.yml
 ```
 
 Three values make it work, and the Plex one is the only awkward part:
@@ -1078,7 +1083,7 @@ docker compose exec zigbee2mqtt ls -l /dev/ttyACM0
 
 **Mosquitto will not start usefully without its config.** Version 2.x listens on
 localhost only and refuses anonymous clients until told otherwise, so
-`/srv/appdata/mosquitto/config/mosquitto.conf` is required rather than optional.
+`/srv/appdata/home/mosquitto/config/mosquitto.conf` is required rather than optional.
 Carrying the existing one over is the first thing §15d does; a broker that
 accepts no connections looks exactly like a broker that is down.
 
@@ -1172,7 +1177,8 @@ The app repo needs nothing but a `Dockerfile`; the stack owns how it is wired in
 1. Clone it into `~/git/<new-app>`.
 2. Write `~/stack/apps/<new-app>.yaml` from the skeleton below — one service,
    `container_name` set so the tunnel URL is predictable, state under
-   `/srv/appdata/<new-app>`, and a host port from §4 only if you want LAN access.
+   `/srv/appdata/apps/<new-app>`, and a host port from §4 only if you want LAN
+   access.
 3. Add it to `~/stack/compose.yaml` under `include:`.
 4. Add a line to `~/stack/autodeploy.conf`.
 5. Add any secrets to `~/stack/.env` **and** `.env.example`, referenced with
@@ -1193,7 +1199,7 @@ services:
       TZ: "${TZ:-Europe/Stockholm}"
       SOME_SECRET: "${NEWAPP_SECRET:?set in ~/stack/.env}"
     volumes:
-      - /srv/appdata/<new-app>:/data   # internal SSD, outside the git checkout
+      - /srv/appdata/apps/<new-app>:/data   # internal SSD, outside the checkout
     # Media-adjacent apps mount /mnt/active or /mnt/archive read-only instead;
     # only qBittorrent gets /mnt/active read-write.
     # ports:                           # only if you want LAN access
@@ -1230,7 +1236,7 @@ services:
     environment:
       TZ: "${TZ:-Europe/Stockholm}"
     volumes:
-      - /srv/appdata/<new-app>:/config
+      - /srv/appdata/apps/<new-app>:/config
     ports:
       - "50xx:50xx"
     restart: unless-stopped
@@ -1481,10 +1487,12 @@ matte-vm's SQLite file are not.
   carries Jellyseerr and matte-vm only.
 - **Home Assistant is the least contained thing on this box**, and knowingly so:
   `network_mode: host` plus `privileged: true` gives it the host's network stack
-  and its devices, which is what its discovery and USB radios require. There is
-  no meaningful sandbox around it, so it gets no public hostname and its own
-  login is the only lock that matters. Keep it patched for the same reason
-  Jellyseerr must be.
+  and its devices. Host networking it genuinely needs, for discovery. `privileged`
+  is worth questioning: it exists for direct hardware access, and the only radio
+  here is the ConBee, which belongs to zigbee2mqtt. Try removing it — if nothing
+  breaks, that is a real reduction in the blast radius of the one container that
+  has none. Either way it gets no public hostname, its own login is the only lock
+  that matters, and it needs patching for the same reason Jellyseerr does.
 - **Be honest about what "no hostname" buys.** Jellyseerr is the one internet-
   facing app that holds Radarr's and Sonarr's API keys, and it sits on the same
   docker network as them. Not being tunnelled stops anyone reaching Radarr
@@ -1667,11 +1675,12 @@ mv /mnt/archive/media/tv      /mnt/archive/tv
 **3. Lift the container state off the media drives.**
 
 ```bash
-mv /mnt/archive/qbittorrent-config  /srv/appdata/qbittorrent
-mv /mnt/archive/prowlarr-config     /srv/appdata/prowlarr
-mv /mnt/archive/gluetun             /srv/appdata/gluetun
-mv /mnt/active/plex/config          /srv/appdata/plex/config
-cp -r ~/git/matte-vm/data/.         /srv/appdata/matte-vm/
+mkdir -p /srv/appdata/{media,home,apps}
+mv /mnt/archive/qbittorrent-config  /srv/appdata/media/qbittorrent
+mv /mnt/archive/prowlarr-config     /srv/appdata/media/prowlarr
+mv /mnt/archive/gluetun             /srv/appdata/media/gluetun
+mv /mnt/active/plex/config          /srv/appdata/media/plex/config
+cp -r ~/git/matte-vm/data/.         /srv/appdata/apps/matte-vm/
 
 # the one real copy: `other` was on the wrong disk (see below)
 mv /mnt/archive/media/other/* /mnt/active/other/ && rmdir /mnt/archive/media/other
@@ -1681,6 +1690,25 @@ sudo chown -R 1000:1000 /srv/appdata /mnt/active /mnt/archive
 On the Pi, `/srv/appdata` is the bind mount from step 1 — so `findmnt
 /srv/appdata` should show the USB device before you run any of these, or they
 land on the SD card and the whole point is lost.
+
+**Already running with a flat `/srv/appdata`?** The grouping in §1 came later, so
+an earlier setup has thirteen directories side by side rather than three. Moving
+them is a rename within one filesystem, so it is instant and safe — but the stack
+must be down, because a running container holds its bind mount:
+
+```bash
+cd ~/stack && docker compose down
+cd /srv/appdata
+sudo mkdir -p media home apps
+sudo mv gluetun qbittorrent prowlarr radarr sonarr bazarr plex media/ 2>/dev/null
+sudo mv jellyseerr kometa matte-vm apps/                              2>/dev/null
+sudo mv homeassistant mosquitto zigbee2mqtt home/                     2>/dev/null
+cd ~/stack && docker compose config -q && docker compose up -d
+```
+
+`2>/dev/null` because not every directory exists on every machine — an app you
+have not set up yet is simply absent, and `mv` complaining about it is noise
+rather than a problem. `config -q` before `up` catches a path you missed.
 
 That `mv` of `other` is a genuine cross-disk copy, and it is fixing a bug rather
 than creating one: `other` used to save to `/downloads/other` on the *library*
@@ -1790,10 +1818,10 @@ Then:
 cd ~/docker/homeassistant && docker compose down     # release the ConBee and the ports
 cd ~/stack
 
-sudo mkdir -p /srv/appdata/{homeassistant,mosquitto,zigbee2mqtt}
-sudo rsync -a ~/docker/homeassistant/config/           /srv/appdata/homeassistant/
-sudo rsync -a ~/docker/homeassistant/mosquitto/        /srv/appdata/mosquitto/
-sudo rsync -a ~/docker/homeassistant/zigbee2mqtt/data/ /srv/appdata/zigbee2mqtt/
+sudo mkdir -p /srv/appdata/home/{homeassistant,mosquitto,zigbee2mqtt}
+sudo rsync -a ~/docker/homeassistant/config/           /srv/appdata/home/homeassistant/
+sudo rsync -a ~/docker/homeassistant/mosquitto/        /srv/appdata/home/mosquitto/
+sudo rsync -a ~/docker/homeassistant/zigbee2mqtt/data/ /srv/appdata/home/zigbee2mqtt/
 
 docker compose up -d homeassistant mosquitto zigbee2mqtt
 docker compose logs -f homeassistant
@@ -1823,7 +1851,7 @@ Four things to check, in this order, because each one masks the next:
    then `Connected to MQTT server`.
 3. **Home Assistant came up on 8123** with your dashboards intact.
 4. **Devices are still there.** Zigbee pairings live in
-   `/srv/appdata/zigbee2mqtt/configuration.yaml` — the network key and PAN id in
+   `/srv/appdata/home/zigbee2mqtt/configuration.yaml` — the network key and PAN id in
    particular — not in the stick, so if that file came across nothing needs
    re-pairing.
 

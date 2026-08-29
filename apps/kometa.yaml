@@ -24,7 +24,7 @@ services:
     volumes:
       # Holds config.yml, which carries the Plex token and TMDB key — this is
       # the one app whose secrets are in a file rather than in ~/stack/.env.
-      - /srv/appdata/kometa:/config
+      - /srv/appdata/apps/kometa:/config
     # No ports: nothing listens. No healthcheck: an idle scheduler is not
     # "unhealthy", and a run-once container plus restart: unless-stopped is a
     # restart loop, so leave the scheduler in charge (README §8).

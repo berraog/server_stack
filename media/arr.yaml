@@ -21,7 +21,7 @@ services:
       - PGID=${PGID:-1000}
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
-      - /srv/appdata/radarr:/config
+      - /srv/appdata/media/radarr:/config
       # Root folder /data/library/movies, importing from /data/downloads/movies.
       # One mount, so the import is a hardlink and the torrent keeps seeding.
       - /mnt/active:/data
@@ -37,7 +37,7 @@ services:
       - PGID=${PGID:-1000}
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
-      - /srv/appdata/sonarr:/config
+      - /srv/appdata/media/sonarr:/config
       - /mnt/active:/data
     ports:
       - "8989:8989"    # LAN only
@@ -54,7 +54,7 @@ services:
       - PGID=${PGID:-1000}
       - TZ=${TZ:-Europe/Stockholm}
     volumes:
-      - /srv/appdata/bazarr:/config
+      - /srv/appdata/media/bazarr:/config
       # Read-write, and the same /data path again: Bazarr writes .srt files
       # alongside the video files Radarr and Sonarr told it about.
       - /mnt/active:/data
