@@ -811,6 +811,29 @@ as a purpose-built UI, but it is already here, already authenticated, and alread
 inside the VPN namespace, and the alternative was maintaining an app for
 something that happens a few times a year.
 
+**Prove the chain before trusting it.** Search anything small in Prowlarr, grab
+it with category `other`, and follow it through — each check catches a different
+break:
+
+```bash
+cd ~/stack
+
+# 1. qBittorrent took the torrent, and put it where the category says
+docker compose exec qbittorrent ls -la /data/incomplete /data/other
+
+# 2. it is downloading through the VPN, not the ISP
+curl -s ifconfig.me; echo                          # the box's own address
+docker compose exec qbittorrent curl -s ifconfig.me # must differ, and be Swedish
+
+# 3. it landed on the host where you expect
+ls -la /mnt/active/other/
+```
+
+If step 1 shows the file under `/data/other` but step 3 shows nothing in
+`/mnt/active/other`, the `/data` mount is not what you think it is (§8). If step
+2 returns the same address twice, stop and fix the VPN before downloading
+anything else — that is the one failure worth catching immediately.
+
 **Two things that will fail later, not now.** The cookie expires — silently, weeks
 in, and Prowlarr disables an indexer after enough consecutive failures, so
 "nothing finds anything any more" usually means repeating step 2. And if TorrentDay
