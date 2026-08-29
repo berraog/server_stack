@@ -603,7 +603,10 @@ docker compose logs qbittorrent | grep -i "temporary password"
    subnets** → `172.16.0.0/12`. Docker bridge networks live in that range, so
    Radarr, Sonarr and Prowlarr authenticate regardless of password changes. The
    WebUI is inside gluetun's namespace and not internet-reachable either way.
-3. *Options → Downloads*:
+3. *Options → Downloads*: **do this before adding anything**, or every torrent
+   errors immediately. The image ships a default save path of `/downloads`, and
+   this stack does not mount that — the only media mount is `/data`, so the
+   default points at nothing.
    - **Default Save Path**: `/data/incomplete`
    - **Keep incomplete torrents in**: `/data/incomplete`
 4. *Categories*. Radarr and Sonarr create and own theirs on first contact — do
@@ -1497,6 +1500,8 @@ matte-vm's SQLite file are not.
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
+| every torrent errors the moment it is added | the default save path is still the image's `/downloads`, which this stack does not mount — the only media mount is `/data` | *Options → Downloads → Default Save Path* → `/data/incomplete` (§8) |
+| torrents error on a path that does exist | `/mnt/active` is not writable by the container user | `sudo chown -R 1000:1000 /mnt/active`; `docker compose exec qbittorrent touch /data/probe` proves it either way |
 | one service is unreachable while its namespace-mate answers | that container was never created — an earlier `up` aborted partway on a name conflict | `docker compose ps -a`; §12 clears the conflict, then `up -d` again |
 | every app looks factory-fresh after a `git pull` | the appdata regrouping moved the mount paths, so the containers are pointed at new empty directories | **nothing is lost** — the data is still at `/srv/appdata/<service>`; do the regrouping in §15b |
 | Prowlarr's qBittorrent client fails against host `gluetun` | Prowlarr is *inside* that namespace, and gluetun's DNS proxy replaced Docker's resolver | host `localhost`, port 8080 (§5) |
