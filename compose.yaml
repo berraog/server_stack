@@ -12,6 +12,7 @@
 include:
   - media/compose.yaml
   - media/arr.yaml
+  - home/compose.yaml
   - apps/matte-vm.yaml
   - apps/jellyseerr.yaml
   - apps/kometa.yaml

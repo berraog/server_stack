@@ -1,0 +1,66 @@
+# Home automation: Home Assistant, its MQTT broker, and the Zigbee bridge.
+#
+# Grouped like media/ rather than dropped into apps/ because the three are one
+# system — Zigbee2MQTT publishes to mosquitto, Home Assistant subscribes — and
+# they are started, stopped and backed up together.
+#
+# Two of these reach outside the container in ways nothing else here does, and
+# both are load-bearing rather than sloppy:
+#   - homeassistant runs host-networked and privileged, which it needs for
+#     discovery protocols and USB/Bluetooth radios. It is the least contained
+#     thing on the box; README §14.
+#   - zigbee2mqtt claims the ConBee II by its by-id path, which encodes the
+#     stick's serial and therefore survives a reboot, a different USB port and
+#     the move to the mini PC. Never use /dev/ttyACM0 on the host side.
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    # Host networking is required, not convenience: HA's discovery (SSDP,
+    # mDNS/zeroconf, DHCP sniffing) only works on the host's own interface.
+    # This is why it collides with Plex's DLNA on UDP 1900 — README §8.
+    network_mode: host
+    privileged: true
+    environment:
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      - /srv/appdata/homeassistant:/config
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto
+    environment:
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      # mosquitto 2.x listens on localhost only and refuses anonymous clients
+      # until told otherwise, so config/mosquitto.conf is required, not
+      # optional. Carry the existing one over — README §15.
+      - /srv/appdata/mosquitto/config:/mosquitto/config
+      - /srv/appdata/mosquitto/data:/mosquitto/data
+      - /srv/appdata/mosquitto/log:/mosquitto/log
+    ports:
+      - "1883:1883"   # MQTT — published so host-networked HA can reach it
+      - "9001:9001"   # MQTT over websockets
+    restart: unless-stopped
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:latest
+    container_name: zigbee2mqtt
+    depends_on: [mosquitto]
+    environment:
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      - /srv/appdata/zigbee2mqtt:/app/data
+    devices:
+      - /dev/serial/by-id/usb-dresden_elektronik_ingenieurtechnik_GmbH_ConBee_II_DE2656890-if00:/dev/ttyACM0
+    ports:
+      - "8082:8082"   # Zigbee2MQTT frontend
+    restart: unless-stopped
+
+  # deCONZ is the alternative to zigbee2mqtt for the same ConBee II, and the two
+  # are mutually exclusive twice over: one stick cannot be claimed by both, and
+  # both want host port 8082. If you ever switch, comment out zigbee2mqtt first
+  # and put deCONZ's state under /srv/appdata/deconz rather than in a home
+  # directory (README §1).

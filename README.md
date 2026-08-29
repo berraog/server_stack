@@ -11,6 +11,7 @@ on the `pi` branch; §15 covers restructuring the disks and moving between them.
 | --- | --- | --- |
 | media | gluetun (VPN), qBittorrent, Prowlarr, Plex | LAN ports |
 | automation | Radarr, Sonarr, Bazarr | LAN ports only — admin tools |
+| home | Home Assistant, Mosquitto, Zigbee2MQTT | LAN ports only |
 | matte-vm | FastAPI + SQLite + PWA | its own Cloudflare hostname |
 | jellyseerr | request front-end for Plex | its own Cloudflare hostname |
 | kometa | Plex collections and posters | nothing — scheduled job, no UI |
@@ -50,6 +51,7 @@ Three disks, three jobs:
 /srv/appdata/          internal 500 GB SSD — all container state
   gluetun/  qbittorrent/  prowlarr/  radarr/  sonarr/  bazarr/
   jellyseerr/  kometa/  plex/{config,transcode}/  matte-vm/
+  homeassistant/  mosquitto/{config,data,log}/  zigbee2mqtt/
 
 /mnt/active/           1 TB USB — everything torrents touch
   incomplete/          qBittorrent's default save path AND its incomplete path
@@ -314,6 +316,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
   compose.yaml                    include: list + cloudflared
   media/compose.yaml              gluetun, qbittorrent, prowlarr, plex
   media/arr.yaml                  radarr, sonarr, bazarr
+  home/compose.yaml               homeassistant, mosquitto, zigbee2mqtt
   apps/matte-vm.yaml              one fragment per standalone app
   apps/jellyseerr.yaml            third-party image, same shape
   apps/kometa.yaml                scheduled job: no port, no hostname
@@ -421,6 +424,10 @@ allocated" surprise when adding an app.
 | 8989 | Sonarr | LAN only, never tunnelled |
 | 6767 | Bazarr | LAN only, never tunnelled |
 | 5055 | Jellyseerr | its own default |
+| 1883 | Mosquitto (MQTT) | published so host-networked HA can reach it |
+| 9001 | Mosquitto (websockets) | |
+| 8082 | Zigbee2MQTT frontend | deCONZ wants the same port — see §8 |
+| 8123 | Home Assistant | `network_mode: host`, so no `ports:` entry |
 | 32400 | Plex | `network_mode: host` |
 
 Container ports never collide, only host ports. An app reachable solely through
@@ -492,6 +499,7 @@ cp ~/stack/.env.example ~/stack/.env && chmod 600 ~/stack/.env && nano ~/stack/.
 #    internal SSD: container state.  USB drives: bulk media only.
 sudo mkdir -p /srv/appdata/{gluetun,qbittorrent,prowlarr,plex/config,plex/transcode}
 sudo mkdir -p /srv/appdata/{radarr,sonarr,bazarr,jellyseerr,kometa,matte-vm}
+sudo mkdir -p /srv/appdata/{homeassistant,mosquitto/{config,data,log},zigbee2mqtt}
 sudo mkdir -p /mnt/active/{incomplete,downloads/{movies,tv},library/{movies,tv}} \
               /mnt/active/{books/{audiobooks,ebooks,magazines},other} \
               /mnt/archive/{movies,tv}
@@ -1036,6 +1044,59 @@ Nothing here is on a hostname or a port. If Kometa appears to do nothing, it is
 almost always the schedule: `KOMETA_TIME` and the container's timezone decide
 when it wakes, and the logs say what it did.
 
+### Home Assistant, Mosquitto and Zigbee2MQTT
+
+`http://<host>:8123`, `http://<host>:8082` for the Zigbee frontend. Mosquitto has
+no UI. All three keep their existing configuration — this was a working setup
+moved in, not a new install, so §15d is the whole job.
+
+**Two conflicts with what was already running.** Neither is a port clash; the
+port registry (§4) is clean. Both come from Home Assistant needing the host's own
+network interface for discovery:
+
+| Conflict | Why | Fix |
+| --- | --- | --- |
+| **UDP 1900 — Plex's DLNA vs HA's SSDP** | both are host-networked and both want the SSDP port. Plex binds it for its DLNA server; HA binds it to discover UPnP devices | turn Plex's DLNA off: *Settings → Server → DLNA → uncheck **Enable the DLNA server***. You almost certainly do not use it — it exists for smart TVs that cannot run a Plex app |
+| **UDP 5353 — HA's zeroconf vs `avahi-daemon`** | Raspberry Pi OS ships avahi enabled, and it holds mDNS. HA's zeroconf then finds nothing and silently discovers no Chromecasts, printers or ESPHome nodes | `sudo systemctl disable --now avahi-daemon` if nothing else needs it, or accept that HA discovery is manual |
+
+Symptoms are quiet in both cases: nothing errors, discovery just comes up empty.
+If HA finds no devices it used to find, start here.
+
+**Zigbee2MQTT and deCONZ are mutually exclusive**, twice over: one ConBee II
+cannot be claimed by two containers, and both want host port 8082. The compose
+file keeps deCONZ as a comment for that reason.
+
+**The ConBee's device path is already right.** `/dev/serial/by-id/usb-dresden_…-if00`
+encodes the stick's serial, so it survives reboots, a different USB port, and the
+move to the mini PC — where `/dev/ttyACM0` would not. Verify after any hardware
+change:
+
+```bash
+ls -l /dev/serial/by-id/
+docker compose exec zigbee2mqtt ls -l /dev/ttyACM0
+```
+
+**Mosquitto will not start usefully without its config.** Version 2.x listens on
+localhost only and refuses anonymous clients until told otherwise, so
+`/srv/appdata/mosquitto/config/mosquitto.conf` is required rather than optional.
+Carrying the existing one over is the first thing §15d does; a broker that
+accepts no connections looks exactly like a broker that is down.
+
+**Who talks to whom**, since the three sit on different networks:
+
+| From | To | Address | Why |
+| --- | --- | --- | --- |
+| Zigbee2MQTT | Mosquitto | `mqtt://mosquitto:1883` | both ordinary bridge services |
+| Home Assistant | Mosquitto | `localhost:1883` | HA is host-networked, so it uses the *published* port, not the service name |
+
+That second row is the one that looks wrong and is not: a host-networked
+container is not on the compose network, so `mosquitto` does not resolve from it
+— the same rule as §5, from the same direction as Jellyseerr reaching Plex (§10).
+
+**Not on the tunnel, deliberately.** Home Assistant controls your house and runs
+privileged; §14 covers why it gets no hostname. If you do want it remotely, it is
+§9 plus an Access policy, and worth more thought than the media apps needed.
+
 ### Retired: torrent-finder
 
 Removed from the stack. It was a manual search-and-grab front-end, and once
@@ -1260,6 +1321,10 @@ git pull && docker compose config -q && docker compose up -d
 # base image updates — media stack only, on purpose
 docker compose pull qbittorrent prowlarr radarr sonarr bazarr plex cloudflared
 docker compose up -d qbittorrent prowlarr radarr sonarr bazarr plex cloudflared
+
+# home automation — separately, because HA migrates its config forward on start
+docker compose pull homeassistant mosquitto zigbee2mqtt
+docker compose up -d homeassistant mosquitto zigbee2mqtt
 docker image prune -f
 
 # gluetun / VPN change: recreates its tenants, interrupts torrents
@@ -1339,6 +1404,8 @@ Restart blast radius, worth internalising:
 | `cloudflared` | every public hostname, ~10s |
 | `qbittorrent`, `prowlarr` | only itself |
 | `radarr`, `sonarr`, `bazarr`, an app | only itself |
+| `mosquitto` | nothing, but Zigbee2MQTT reconnects and HA's entities go briefly unavailable |
+| `homeassistant`, `zigbee2mqtt` | only itself |
 
 **Rollback** an app: `git -C ~/git/<app> checkout <good-sha>` then
 `docker compose up -d --build --no-deps <service>`. Autodeploy will pull it
@@ -1376,6 +1443,9 @@ matte-vm's SQLite file are not.
 | `conflicting options: port publishing and the container type network mode` | a `ports:` block on a service using `network_mode: service:gluetun` | move the port to gluetun's `ports:` |
 | `port is already allocated` | host port collision | pick a free host port, update §4 |
 | Radarr/Sonarr cannot reach qBittorrent or the indexers | namespace tenants have no DNS name | `http://gluetun:8080` and `http://gluetun:9696`, never their own names (§5) |
+| HA discovers nothing it used to, no error anywhere | Plex's DLNA holds UDP 1900, or `avahi-daemon` holds 5353 | §8 — disable Plex's DLNA server, and avahi if unused |
+| Zigbee2MQTT cannot open the adapter | the ConBee is on a different port, or deCONZ is running and holds it | `ls -l /dev/serial/by-id/`; the two are mutually exclusive (§8) |
+| MQTT clients connect and are refused | mosquitto 2.x defaults to localhost-only, anonymous denied | its `config/mosquitto.conf` did not come across (§15d) |
 | Prowlarr worked for weeks, then finds nothing | the TorrentDay cookie expired and the indexer was auto-disabled | redo §8 step 2; check *Indexers* for a disabled one |
 | Prowlarr's indexer test returns a Cloudflare challenge | the cookie is bound to your browser's IP, not the VPN exit | FlareSolverr as an indexer proxy (§8) |
 | `up -d` creates a network and reports no containers | the checkout directory name differs from the running containers' compose project | `COMPOSE_PROJECT_NAME=stack` in `.env` (§12) |
@@ -1409,6 +1479,12 @@ matte-vm's SQLite file are not.
   auth. Radarr, Sonarr, Bazarr and qBittorrent can all rewrite or delete the
   library, which is exactly why none of them has a hostname (§9) — the tunnel
   carries Jellyseerr and matte-vm only.
+- **Home Assistant is the least contained thing on this box**, and knowingly so:
+  `network_mode: host` plus `privileged: true` gives it the host's network stack
+  and its devices, which is what its discovery and USB radios require. There is
+  no meaningful sandbox around it, so it gets no public hostname and its own
+  login is the only lock that matters. Keep it patched for the same reason
+  Jellyseerr must be.
 - **Be honest about what "no hostname" buys.** Jellyseerr is the one internet-
   facing app that holds Radarr's and Sonarr's API keys, and it sits on the same
   docker network as them. Not being tunnelled stops anyone reaching Radarr
@@ -1444,7 +1520,8 @@ new layout is proven before new hardware is in the way.
 | §15a | which branch you are on and how to keep it cheap to rebase |
 | **§15b** | **the disks: swap the mountpoints, then rename directories, then lift container state off them** |
 | §15c | telling the apps where it went: qBittorrent's paths, then Library Import |
-| §15d | carrying it all to the mini PC |
+| §15d | folding in the existing Home Assistant setup |
+| §15e | carrying it all to the mini PC |
 
 §15b and §15c are one sitting, in that order — 15b moves bytes, 15c makes the
 applications agree with the result — and the stack stays down in between.
@@ -1680,7 +1757,48 @@ the torrents carry on seeding from `downloads/` untouched.
 Point Plex's libraries at `library/` and `/archive/...`, never at `downloads/`,
 and remove the old folder paths from the library so nothing appears twice.
 
-### 15d. Moving to the mini PC
+### 15d. Bringing Home Assistant in
+
+It was running from its own compose project under `~/docker/homeassistant`, with
+relative volumes (`./config`, `./mosquitto/...`). Those paths resolve against
+whichever directory the compose file sits in, so simply moving the file would
+silently point them at `~/stack/home/` — hence absolute `/srv/appdata` paths in
+`home/compose.yaml`, and hence a data move.
+
+```bash
+cd ~/docker/homeassistant && docker compose down     # release the ConBee and the ports
+cd ~/stack
+
+sudo mkdir -p /srv/appdata/{homeassistant,mosquitto/{config,data,log},zigbee2mqtt}
+sudo rsync -a ~/docker/homeassistant/config/          /srv/appdata/homeassistant/
+sudo rsync -a ~/docker/homeassistant/mosquitto/       /srv/appdata/mosquitto/
+sudo rsync -a ~/docker/homeassistant/zigbee2mqtt/data/ /srv/appdata/zigbee2mqtt/
+sudo chown -R 1000:1000 /srv/appdata/{homeassistant,mosquitto,zigbee2mqtt}
+
+docker compose up -d homeassistant mosquitto zigbee2mqtt
+docker compose logs -f homeassistant
+```
+
+`rsync -a` rather than `mv`, so the originals stay put until the new stack has
+proved itself. Delete `~/docker/homeassistant` once it has.
+
+Four things to check, in this order, because each one masks the next:
+
+1. **Mosquitto accepted its config** — `docker compose logs mosquitto` should show
+   it opening the listener, not defaulting to localhost.
+2. **Zigbee2MQTT found the stick and the broker** — its log names the adapter and
+   then `Connected to MQTT server`.
+3. **Home Assistant came up on 8123** with your dashboards intact. It migrates
+   its config forward on first start with a newer image, and that migration does
+   not roll back, so this is the point of no return for the old directory.
+4. **Devices are still there.** Zigbee pairings live in
+   `/srv/appdata/zigbee2mqtt/`, not in the stick, so if that directory came across
+   correctly nothing needs re-pairing.
+
+Then do the two conflict fixes in §8 — Plex's DLNA and `avahi-daemon` — or HA's
+discovery will be quietly broken in a way that looks like nothing at all.
+
+### 15e. Moving to the mini PC
 
 By this point the layout is proven and the move is mostly cabling.
 
