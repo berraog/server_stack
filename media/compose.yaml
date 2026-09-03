@@ -59,7 +59,7 @@ services:
       start_period: 30s
 
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:latest
+    image: lscr.io/linuxserver/qbittorrent:4.6.5
     container_name: qbittorrent
     network_mode: "service:gluetun"
     depends_on:
