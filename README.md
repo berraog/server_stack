@@ -325,6 +325,7 @@ getent group render | cut -d: -f3        # e.g. 993 -> RENDER_GID in ~/stack/.en
   apps/jellyseerr.yaml            third-party image, same shape
   apps/kometa.yaml                scheduled job: no port, no hostname
   hw/x86.yaml                     the only per-hardware overlay, picked in .env
+  bin/bootstrap                   provision a fresh box up to `up -d` (§7)
   bin/autodeploy                  poll git, redeploy what changed
   autodeploy.conf                 repo -> service map
   systemd/autodeploy.{service,timer}   installed into /etc (§11)
@@ -499,6 +500,36 @@ is the one file that cannot be reconstructed from the repos.
 | Prowlarr's / Radarr's / Sonarr's API keys | each other | entered in each app's UI, never in `.env` |
 
 ## 7. First-time setup, in order
+
+[`bin/bootstrap`](bin/bootstrap) does steps 1–4 below, plus §11's timer. Three
+commands come first, because cloning the repo that holds the script needs git:
+
+```bash
+sudo apt update && sudo apt install -y git
+git clone git@github.com:<you>/server_stack.git ~/stack
+~/stack/bin/bootstrap
+```
+
+It is idempotent — re-running it is the intended way to audit a box, and each
+step either verifies what is already true or skips itself. It detects Pi vs mini
+PC and writes the matching `COMPOSE_FILE` (§3), fills `RENDER_GID` from the
+host's render group, refuses to continue on Debian's `docker.io` (§2), creates
+the directory tree, and finishes by naming every `.env` value still empty.
+
+**Three things it will not do**, all for the same reason — the cost of guessing
+wrong is higher than the keystrokes saved:
+
+- **Touch `/etc/fstab`.** UUIDs are per-disk, and a wrong line leaves a headless
+  box in emergency mode with no network (§1). It prints the lines with the
+  candidate disks listed, and stops until the mounts are real.
+- **Create the directory tree before the mounts exist.** `mkdir` onto an
+  unmounted `/srv/appdata` *succeeds*, on the boot disk, silently — the failure
+  in §13's second row. So the mount check gates the tree, which is why the
+  script exits rather than carrying on.
+- **Invent secrets.** It reports which are missing and where each comes from.
+
+The rest of this section is what the script does, in case it fails or you are on
+something it does not cover:
 
 ```bash
 # 1. clone
@@ -1560,6 +1591,10 @@ All four pieces are committed: [`bin/autodeploy`](bin/autodeploy), the repo →
 service map in [`autodeploy.conf`](autodeploy.conf), and the units in
 [`systemd/`](systemd). `autodeploy.conf` and the units hardcode
 `/home/bjorngreen`; change both if the Ubuntu user is not `bjorngreen`.
+
+`bin/bootstrap` installs and enables these, but only when the user really is
+`bjorngreen` at `~/stack` — anywhere else it skips the step and says so, because
+enabling a timer against the wrong paths just fails every five minutes. By hand:
 
 ```bash
 sudo cp ~/stack/systemd/autodeploy.service ~/stack/systemd/autodeploy.timer \
