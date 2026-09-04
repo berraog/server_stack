@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# Bring a fresh Debian/Ubuntu box to the point where `docker compose up -d`
+# would work — packages, Docker, the directory tree, .env, autodeploy.
+#
+# Chicken and egg: this script lives in the repo, and cloning the repo needs
+# git. So on a genuinely bare machine, three commands come first:
+#
+#   sudo apt update && sudo apt install -y git
+#   git clone https://github.com/<you>/server_stack.git ~/stack
+#   ~/stack/bin/bootstrap
+#
+# Idempotent by design — re-running it is the intended way to check a box, and
+# every step either verifies what is already true or skips itself.
+#
+# What it deliberately does NOT do, because getting it wrong is expensive:
+#
+#   * touch /etc/fstab. UUIDs are per-disk and a bad line leaves a headless box
+#     in emergency mode with no network (README §1). It lists the candidate
+#     filesystems and the exact lines to add, then stops.
+#   * format or partition anything.
+#   * invent secrets. It reports which of .env's required values are still
+#     empty and leaves them to you (§2 has where each one comes from).
+#   * configure the apps themselves — §8 — or the tunnel's hostnames (§9).
+set -euo pipefail
+
+# ── plumbing ───────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; OFF=$'\033[0m'
+else
+  BOLD=; RED=; YEL=; GRN=; OFF=   # piped or journalled: no escape codes
+fi
+step() { printf '\n%s==> %s%s\n' "$BOLD" "$*" "$OFF"; }
+ok()   { printf '    %s✓%s %s\n' "$GRN" "$OFF" "$*"; }
+warn() { printf '    %s!%s %s\n' "$YEL" "$OFF" "$*"; WARNINGS+=("$*"); }
+die()  { printf '\n%sxx %s%s\n\n' "$RED" "$*" "$OFF" >&2; exit 1; }
+WARNINGS=()
+
+# The repo is wherever this script is, not an assumed path — but the units and
+# autodeploy.conf hardcode ~/stack, so anywhere else is a warning below.
+STACK=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# Docker group membership only takes effect on a new login, so a first run
+# cannot talk to the daemon as the user. Reach it with sudo until it can.
+DOCKER=docker
+dk() { $DOCKER "$@"; }
+
+step "Preflight"
+[[ $EUID -ne 0 ]] || die "run as your normal user, not root — the docker group and PUID/PGID are yours, not root's"
+command -v apt-get >/dev/null || die "not a Debian/Ubuntu box; nothing else here is portable either"
+sudo -v || die "this needs sudo"
+ok "running as $USER from $STACK"
+
+# ── 1. hardware ────────────────────────────────────────────────────────────
+# One thing differs between the two machines: whether hw/x86.yaml is in play
+# (README §3). Everything else on this page is identical.
+step "Hardware"
+if grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null; then
+  HARDWARE=pi
+  COMPOSE_FILE_VALUE='compose.yaml'
+  ok "Raspberry Pi ($(tr -d '\0' </proc/device-tree/model)) — no overlay"
+else
+  HARDWARE=x86
+  COMPOSE_FILE_VALUE='compose.yaml:hw/x86.yaml'
+  ok "not a Pi ($(uname -m)) — using hw/x86.yaml for Quick Sync"
+fi
+
+# ── 2. packages ────────────────────────────────────────────────────────────
+step "Packages (§2)"
+MISSING=()
+for pkg in git curl jq python3 ca-certificates; do
+  dpkg -s "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
+done
+if ((${#MISSING[@]})); then
+  sudo apt-get update -qq
+  sudo apt-get install -y "${MISSING[@]}"
+  ok "installed: ${MISSING[*]}"
+else
+  ok "git, curl, jq, python3 already present"
+fi
+
+# ── 3. Docker ──────────────────────────────────────────────────────────────
+# Debian's docker.io ships a Compose below v2.20, where the `include:` key is
+# silently unsupported — compose.yaml then assembles to nothing at all and
+# reports no error. That failure is invisible, so refuse to build on it.
+step "Docker Engine and Compose v2.20+ (§2)"
+if dpkg -s docker.io >/dev/null 2>&1; then
+  die "docker.io is installed. Its Compose predates include:, which fails silently.
+     sudo apt-get purge -y docker.io && then re-run this script"
+fi
+if ! command -v docker >/dev/null; then
+  curl -fsSL https://get.docker.com | sh
+  ok "installed Docker from Docker's own repo"
+else
+  ok "docker present: $(docker --version | cut -d, -f1)"
+fi
+
+docker info >/dev/null 2>&1 || DOCKER="sudo docker"
+# Not `... | tr` with a `|| die`: the pipeline's status is tr's, which always
+# succeeds, so a missing plugin would fall through to the version comparison
+# below and be reported as the wrong problem.
+COMPOSE_VER=$(dk compose version --short 2>/dev/null) || COMPOSE_VER=
+COMPOSE_VER=${COMPOSE_VER#v}
+[[ -n $COMPOSE_VER ]] || die "docker compose v2 is not available — the plugin did not install"
+# sort -V, so 2.9 does not compare above 2.20 the way a string would.
+if [[ $(printf '%s\n2.20.0\n' "$COMPOSE_VER" | sort -V | head -1) != "2.20.0" ]]; then
+  die "Compose $COMPOSE_VER is below v2.20 — include: is silently ignored (§2)"
+fi
+ok "compose $COMPOSE_VER"
+
+if id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
+  ok "$USER is in the docker group"
+else
+  sudo usermod -aG docker "$USER"
+  warn "added $USER to the docker group — log out and back in before docker works without sudo"
+fi
+
+sudo systemctl enable --now docker >/dev/null
+ok "docker.service enabled at boot"
+
+# ── 4. host identity ───────────────────────────────────────────────────────
+# Every container runs as PUID/PGID from .env, and the files on the media disks
+# are owned by that pair. A first user who is not 1000:1000 is legal but means
+# .env has to say so, or nothing can write to /data.
+step "Host identity"
+HOST_UID=$(id -u); HOST_GID=$(id -g)
+if [[ $HOST_UID == 1000 && $HOST_GID == 1000 ]]; then
+  ok "uid:gid is 1000:1000, matching .env's PUID/PGID"
+else
+  warn "uid:gid is $HOST_UID:$HOST_GID, not 1000:1000 — set PUID=$HOST_UID and PGID=$HOST_GID in .env, and chown the data dirs to match"
+fi
+
+[[ -e /dev/net/tun ]] && ok "/dev/net/tun present for gluetun" \
+                      || warn "/dev/net/tun missing — gluetun cannot start (modprobe tun)"
+
+# ── 5. disks ───────────────────────────────────────────────────────────────
+# The order here is the whole point. mkdir onto an unmounted /srv/appdata
+# SUCCEEDS — on the boot disk, silently — and every container then writes its
+# state to the SD card until the card dies (§1, §13). So the mounts are checked
+# first and the tree is only created once they are real.
+step "Disks (§1)"
+MOUNTS_OK=1
+for mp in /mnt/active /mnt/archive /srv/appdata; do
+  if findmnt -n "$mp" >/dev/null 2>&1; then
+    ok "$mp <- $(findmnt -n -o SOURCE "$mp")"
+  else
+    warn "$mp is NOT a mount point"
+    MOUNTS_OK=0
+  fi
+done
+
+# A bind mount that landed on the boot disk looks mounted and is still wrong.
+# findmnt prints a bind as DEVICE[/subpath], so strip the subpath from BOTH
+# sides — otherwise a bind that landed on the boot disk reads as a different
+# source than / and this check silently passes, which is the whole failure it
+# is here to catch.
+device_of() { findmnt -n -o SOURCE "$1" | sed 's/\[.*//'; }
+if findmnt -n /srv/appdata >/dev/null 2>&1; then
+  if [[ $(device_of /srv/appdata) == "$(device_of /)" ]]; then
+    warn "/srv/appdata resolves to the boot disk — the bind ran before /mnt/archive was ready; x-systemd.requires-mounts-for is missing (§13)"
+    MOUNTS_OK=0
+  fi
+fi
+
+if ((!MOUNTS_OK)); then
+  cat <<'FSTAB'
+
+    The disks are not mounted, and this script will not edit /etc/fstab for you:
+    a wrong line leaves a headless box in emergency mode with no network.
+
+    Candidate filesystems on this machine:
+FSTAB
+  lsblk -o NAME,SIZE,FSTYPE,UUID,MOUNTPOINT | sed 's/^/      /'
+  cat <<'FSTAB'
+
+    Per §1: active is the LARGER disk (it holds seeding torrents plus the
+    library and must have room to grow), archive the smaller. Add to /etc/fstab,
+    the bind line strictly BELOW the /mnt/archive line it depends on:
+
+      UUID=<active>   /mnt/active   ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+      UUID=<archive>  /mnt/archive  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+      /mnt/archive/appdata  /srv/appdata  none  bind,nofail,x-systemd.requires-mounts-for=/mnt/archive  0  0
+
+    Then:
+      sudo mkdir -p /mnt/active /mnt/archive /mnt/archive/appdata /srv/appdata
+      sudo mount -a && findmnt /srv/appdata    # must name the USB device, not the card
+
+    Re-run this script afterwards; it picks up where it left off.
+
+FSTAB
+  die "mount the disks first (§1), then re-run"
+fi
+
+# ── 6. directory tree ──────────────────────────────────────────────────────
+step "Data directories (§7 step 3)"
+sudo mkdir -p /srv/appdata/media/{gluetun,qbittorrent,prowlarr,radarr,sonarr,bazarr,plex/{config,transcode}}
+sudo mkdir -p /srv/appdata/home/{homeassistant,mosquitto,zigbee2mqtt}
+sudo mkdir -p /srv/appdata/apps/{jellyseerr,kometa,matte-vm}
+sudo mkdir -p /mnt/active/{incomplete,downloads/{movies,tv},library/{movies,tv}} \
+              /mnt/active/{books/{audiobooks,ebooks,magazines},other} \
+              /mnt/archive/{movies,tv}
+# Recursive on purpose: a container that cannot write its own state directory
+# is §13's "config persistence" symptom. On a box with a full library this
+# walks every file and takes minutes — it changes nothing already correct.
+sudo chown -R "$HOST_UID:$HOST_GID" /srv/appdata /mnt/active /mnt/archive
+ok "tree created under /srv/appdata, /mnt/active, /mnt/archive; owned by $HOST_UID:$HOST_GID"
+
+# qBittorrent's own default save path is /downloads, which this stack does not
+# mount, and every torrent errors on add until it is repointed at /data (§8
+# step 3, §13). The directory existing is the precondition, not the fix.
+ok "/mnt/active/incomplete exists — still set it as qBittorrent's save path (§8 step 3)"
+
+# ── 7. checkout location ───────────────────────────────────────────────────
+step "Checkout location (§7 step 1)"
+if [[ $STACK == "$HOME/stack" ]]; then
+  ok "$STACK"
+else
+  warn "the checkout is at $STACK, but autodeploy.conf and systemd/*.service hardcode $HOME/stack — move it, or edit both"
+fi
+
+if [[ -d $HOME/git/matte-vm ]]; then
+  ok "~/git/matte-vm cloned (apps/matte-vm.yaml builds from it)"
+else
+  warn "~/git/matte-vm is not cloned — a missing build context fails the WHOLE project. Clone it into ~/git, or comment its include: line in compose.yaml"
+fi
+
+# ── 8. .env ────────────────────────────────────────────────────────────────
+step "~/stack/.env (§6)"
+ENV_FILE="$STACK/.env"
+if [[ ! -f $ENV_FILE ]]; then
+  cp "$STACK/.env.example" "$ENV_FILE"
+  ok "created .env from .env.example"
+fi
+chmod 600 "$ENV_FILE"
+
+# Rewrite in place if the key exists, append if it does not — so re-running
+# never duplicates a key and never clobbers a secret.
+set_env() {
+  local key=$1 value=$2
+  if grep -qE "^${key}=" "$ENV_FILE"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+}
+
+set_env COMPOSE_FILE "$COMPOSE_FILE_VALUE"
+ok "COMPOSE_FILE=$COMPOSE_FILE_VALUE"
+# Without this, a checkout named server_stack becomes a second compose project
+# that owns none of the running containers (§12).
+set_env COMPOSE_PROJECT_NAME stack
+set_env PUID "$HOST_UID"
+set_env PGID "$HOST_GID"
+
+if [[ $HARDWARE == x86 ]]; then
+  if RENDER_GID=$(getent group render | cut -d: -f3) && [[ -n $RENDER_GID ]]; then
+    set_env RENDER_GID "$RENDER_GID"
+    ok "RENDER_GID=$RENDER_GID for Quick Sync"
+  else
+    warn "no render group on this host — hw/x86.yaml refuses to start without RENDER_GID"
+  fi
+fi
+
+# The five ${VAR:?} references across the compose files. Any one of them empty
+# and the container using it exits at start, which §13 lists as its own symptom.
+step "Secrets still to fill in (§2)"
+REQUIRED=(CLOUDFLARE_TUNNEL_TOKEN WIREGUARD_PRIVATE_KEY MVM_KID_PIN MVM_PARENT_PASSWORD)
+[[ $HARDWARE == x86 ]] && REQUIRED+=(RENDER_GID)
+EMPTY=()
+for key in "${REQUIRED[@]}"; do
+  value=$(grep -E "^${key}=" "$ENV_FILE" | head -1 | cut -d= -f2-)
+  [[ -n ${value//[\"\' ]/} ]] && ok "$key set" || EMPTY+=("$key")
+done
+if ((${#EMPTY[@]})); then
+  for key in "${EMPTY[@]}"; do warn "$key is empty"; done
+  cat <<'SECRETS'
+
+    Where each comes from:
+      WIREGUARD_PRIVATE_KEY    NordLynx key, not your login — §2:
+        curl -s -u token:<ACCESS_TOKEN> https://api.nordvpn.com/v1/users/services/credentials | jq -r .nordlynx_private_key
+      CLOUDFLARE_TUNNEL_TOKEN  Zero Trust > Networks > Tunnels > your tunnel > Docker
+      MVM_KID_PIN / MVM_PARENT_PASSWORD   your choice, matte-vm's two logins
+
+SECRETS
+fi
+
+# ── 9. autodeploy ──────────────────────────────────────────────────────────
+# The units name /home/bjorngreen explicitly, so installing them for a
+# differently-named user would enable a timer that fails every five minutes.
+step "Autodeploy timer (§11)"
+if [[ $USER == bjorngreen && $STACK == "$HOME/stack" ]]; then
+  sudo cp "$STACK/systemd/autodeploy.service" "$STACK/systemd/autodeploy.timer" /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now autodeploy.timer >/dev/null
+  ok "autodeploy.timer enabled — journalctl -u autodeploy -f to watch"
+else
+  warn "skipped: systemd/*.service and autodeploy.conf hardcode user bjorngreen and /home/bjorngreen/stack. Edit both, then follow §11 by hand"
+fi
+
+# ── 10. verify ─────────────────────────────────────────────────────────────
+step "Assembled config (§7 step 4)"
+if ((${#EMPTY[@]})); then
+  warn "skipping docker compose config — it would fail on the empty values above"
+elif (cd "$STACK" && dk compose config -q 2>&1); then
+  ok "docker compose config -q passes: every fragment assembles"
+else
+  warn "docker compose config failed — read the error above before starting anything"
+fi
+
+# ── summary ────────────────────────────────────────────────────────────────
+printf '\n%s%s%s\n' "$BOLD" "────────────────────────────────────────────────────────" "$OFF"
+if ((${#WARNINGS[@]})); then
+  printf '%sBootstrap finished with %d thing(s) to deal with:%s\n' "$YEL" "${#WARNINGS[@]}" "$OFF"
+  for w in "${WARNINGS[@]}"; do printf '  %s!%s %s\n' "$YEL" "$OFF" "$w"; done
+else
+  printf '%sBootstrap clean.%s\n' "$GRN" "$OFF"
+fi
+
+cat <<'NEXT'
+
+Next, in this order — none of it is scriptable (§7 onwards):
+
+  1. VPN first, alone, and confirm it really is up:
+       cd ~/stack && docker compose up -d gluetun
+       docker compose logs gluetun | grep -i 'public ip'   # want "(Sweden ...)"
+  2. Everything else:
+       docker compose up -d && docker compose ps
+  3. Prove the torrent traffic is tunnelled — the one check that matters most:
+       curl -s ifconfig.me; echo
+       docker compose exec qbittorrent curl -s ifconfig.me   # must differ
+  4. Per-app configuration, §8. qBittorrent's save path is step 3 there, and
+     doing it before adding a torrent avoids the errored-on-add trap.
+  5. Cloudflare hostnames, §9.
+
+NEXT
