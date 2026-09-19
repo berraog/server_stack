@@ -1,0 +1,131 @@
+# Games stack: ES-DE on the TV, emulators behind it.
+#
+# The one thing to understand before reading further: **ES-DE is a frontend
+# only.** It browses the library and drives the controller UI, and it cannot
+# run a single game by itself. The emulators are the `retroarch` service
+# below, in its own container, and the two halves find each other through the
+# two named volumes at the bottom of this file. A compose file with just
+# `es-de` in it boots to a menu where every game fails to launch.
+#
+# This stack is unlike every other fragment here in that it owns the physical
+# console. There is no port, no hostname and no web UI — the output is the
+# HDMI socket and the input is a Bluetooth pad (README §16).
+#
+# Three consequences of that, which explain most of what looks odd below:
+#
+# 1. **ES-DE runs its own Xorg**, on the HDMI output, inside the container
+#    (ESDE_USE_INTERNAL_X=1). The host stays a headless server with no display
+#    manager, no openbox and no X packages installed. Nothing to maintain.
+# 2. **That X server has to be shared**, because RetroArch is a different
+#    container and must draw on the same screen. `x11-socket` below is the
+#    directory the socket lives in: ES-DE mounts it read-write because it is
+#    the server creating the socket, RetroArch read-only because it is only a
+#    client connecting to it. Getting those two the same way round is the
+#    difference between a working setup and a black screen.
+# 3. **Bluetooth pairing happens on the host, not here.** BlueZ owns the
+#    adapter; once a pad is paired it appears as /dev/input/event*, and that
+#    is what gets passed through. README §16 has the bluetoothctl recipe.
+#
+# `privileged: true` is the vendor's requirement, not a shortcut taken here —
+# driving KMS, VTs and evdev from a container needs it. This is the only
+# privileged service on the box, which is precisely why it publishes no port
+# and is not reachable through the tunnel (README §14).
+services:
+  es-de:
+    # Pin once a version is known good. ES-DE migrates gamelists and settings
+    # forward on start, so a downgrade is not a clean rollback:
+    #   docker compose exec es-de es-de --version
+    image: blackoutsecure/emulationstation-de:latest
+    container_name: es-de
+    environment:
+      TZ: "${TZ:-Europe/Stockholm}"
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      # Start Xorg inside the container on the HDMI output. Set to 0 only if
+      # you ever put a real desktop session on the host and want to borrow it.
+      ESDE_USE_INTERNAL_X: "1"
+      DISPLAY_NUM: "0"           # => /tmp/.X11-unix/X0 in the shared volume
+      XDG_RUNTIME_DIR: /run/esde
+      UDEV: "1"                  # hotplug discovery, so a pad found after boot works
+      # auto prefers USB > 3.5mm > HDMI, which on a TV picks the wrong one.
+      ESDE_AUDIO_OUTPUT: "${ESDE_AUDIO_OUTPUT:-hdmi}"
+    volumes:
+      # Settings, themes, gamelists and scraped artwork — the expensive part to
+      # lose, since scraping a large library takes hours. Internal SSD.
+      - /srv/appdata/games/es-de:/config
+      # Read-only on purpose: ES-DE never writes here, and the importer is the
+      # only thing that should touch this tree (bin/roms-import, README §16).
+      - /mnt/active/games/roms:/roms:ro
+      - /mnt/active/games/bios:/bios:ro
+      - x11-socket:/tmp/.X11-unix               # rw — this container IS the X server
+      - emulator-control:/run/retrostack-emulators
+      - pulse-socket:/run/pulse
+    devices:
+      - /dev/dri:/dev/dri        # N95 iGPU — Mesa rendering for the UI
+      - /dev/input:/dev/input    # the paired controller arrives here
+      - /dev/uinput:/dev/uinput  # virtual pads, and SDL's controller remapping
+      - /dev/snd:/dev/snd        # HDMI audio
+    privileged: true
+    # The vendor's floor. The UI keeps whole theme spritesheets in shared
+    # memory and the default 64m makes it crawl on a 4K theme.
+    shm_size: 1gb
+    tmpfs:
+      - /var/tmp
+      - /run:exec                # startx needs an executable runtime dir
+    # No healthcheck, for the same reason kometa has none (README §10): a
+    # full-screen SDL application answers nothing, so any check would mark it
+    # unhealthy forever.
+    #
+    # No `ports:` and no `network_mode: host`. ES-DE listens on nothing; it
+    # only needs outbound access for the scraper, which the default bridge
+    # already gives it. Host networking would buy nothing and would take this
+    # privileged container out of the project's own network (README §4).
+    restart: unless-stopped
+
+  retroarch:
+    # The emulators. Runs as a daemon doing nothing until ES-DE asks it for a
+    # game: the launch shim writes the command line into a FIFO under
+    # /run/retrostack-emulators, RetroArch runs the game on ES-DE's X display,
+    # then writes the exit code back and goes idle again. That is why this
+    # service looks permanently "up" while nothing is playing.
+    image: blackoutsecure/retrostack:retroarch
+    container_name: retroarch
+    environment:
+      TZ: "${TZ:-Europe/Stockholm}"
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      DISPLAY: ":0"                        # matches es-de's DISPLAY_NUM
+      RETROSTACK_FRONTEND_MODE: daemon     # wait for ES-DE; never grab the screen itself
+    volumes:
+      # Cores, per-core settings, save files and save states. Losing this loses
+      # every in-game save, so it sits on the internal SSD with everything else.
+      - /srv/appdata/games/retroarch:/config
+      - /mnt/active/games/roms:/roms:ro
+      - /mnt/active/games/bios:/bios:ro
+      - x11-socket:/tmp/.X11-unix:ro       # ro — this container is only a client
+      - emulator-control:/run/retrostack-emulators
+      - pulse-socket:/run/pulse
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/input:/dev/input
+      - /dev/uinput:/dev/uinput
+      - /dev/snd:/dev/snd
+    privileged: true
+    shm_size: 1gb
+    tmpfs:
+      - /var/tmp
+      - /run:exec
+    # Starting ES-DE first means the X socket exists before RetroArch looks for
+    # it. It is not a hard dependency — the daemon retries — but it removes a
+    # noisy failed start from the logs on every boot.
+    depends_on:
+      - es-de
+    restart: unless-stopped
+
+# Both are shared between the two containers and nothing else. Named volumes
+# rather than host paths because none of this is state worth keeping: they hold
+# a socket, a pair of FIFOs and an audio socket, all recreated on every start.
+volumes:
+  x11-socket:          # ES-DE's Xorg socket, so RetroArch can draw on the TV
+  emulator-control:    # the .cmd / .status FIFOs ES-DE launches games through
+  pulse-socket:        # so game audio and UI audio reach the same HDMI sink

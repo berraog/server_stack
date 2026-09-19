@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Sort a pile of downloaded ROMs into the tree ES-DE expects, by hardlink.
+#
+# ES-DE does not scan for games. It looks for exactly one directory per system,
+# named exactly what ES-DE calls that system — /roms/snes, /roms/megadrive,
+# /roms/psx — and ignores everything else. A folder of mixed downloads shows up
+# as an empty frontend with no error, which is the single most common way this
+# stack looks broken when it is not.
+#
+# This is the same trick as downloads/ and library/ in README §1, for the same
+# reason. A hardlink is a second *name* for one set of blocks, so the download
+# keeps whatever name and layout it arrived with, ES-DE sees the tidy tree it
+# insists on, and the bytes exist once. `df` counts them once. Deleting either
+# name leaves the other working.
+#
+#   bin/roms-import                 # dry run: say what would happen, touch nothing
+#   bin/roms-import --apply         # actually create the links
+#   bin/roms-import --apply ~/dump  # from somewhere other than /mnt/active/other
+#
+# Safe to re-run: a link that already points at the right inode is skipped, so
+# this is the normal way to pick up newly downloaded games.
+set -euo pipefail
+
+SRC="${2:-${ROMS_SRC:-/mnt/active/other}}"
+DST="${ROMS_DST:-/mnt/active/games/roms}"
+APPLY=0
+[[ "${1:-}" == "--apply" ]] && APPLY=1
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { sed -n '2,20p' "$0" | sed 's/^# \?//'; exit 0; }
+# `bin/roms-import ~/dump` with no --apply: first arg is the source, not a flag.
+[[ $APPLY -eq 0 && -n "${1:-}" ]] && SRC="$1"
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+else
+  BOLD=; RED=; YEL=; GRN=; DIM=; OFF=
+fi
+die() { printf '%sxx %s%s\n' "$RED" "$*" "$OFF" >&2; exit 1; }
+
+[[ -d "$SRC" ]] || die "source does not exist: $SRC"
+
+# ── the mapping ────────────────────────────────────────────────────────────
+#
+# Extensions that identify exactly one system, checked against ES-DE's own
+# es_systems.xml. Deliberately incomplete: .zip .iso .bin .cue .chd .7z .img
+# .rom and .elf are each claimed by a dozen systems and are NOT listed here,
+# because a wrong guess files a game where nobody will ever find it. Those are
+# resolved by folder name below instead, and anything still unresolved is
+# reported rather than moved.
+#
+# Where a system has regional twins ES-DE keeps both spellings — megadrive and
+# genesis, snes and snesna, nes and famicom. These pick the international one.
+# Change the right-hand side here if you prefer the US names; nothing else in
+# the stack depends on the choice.
+ext_system() {
+  case "${1,,}" in
+    nes|fds|unf|unif)                 echo nes ;;
+    sfc|smc|fig|swc|bsx|gd3|gd7|mgd)  echo snes ;;
+    md|smd|gen|mdx)                   echo megadrive ;;
+    32x)                              echo sega32x ;;
+    sms)                              echo mastersystem ;;
+    gg)                               echo gamegear ;;
+    gb|dmg)                           echo gb ;;
+    gbc|cgb)                          echo gbc ;;
+    gba|agb)                          echo gba ;;
+    n64|z64|v64|ndd)                  echo n64 ;;
+    nds|dsi)                          echo nds ;;
+    gcm|gcz|tgc)                      echo gc ;;
+    wbfs)                             echo wii ;;
+    rpx|wua|wud|wux|wuhb)             echo wiiu ;;
+    nsp|xci|nca|nro)                  echo switch ;;
+    cbn|ecm|psexe|znx|minipsf)        echo psx ;;
+    cso|prx)                          echo psp ;;
+    isz|zso)                          echo ps2 ;;
+    pce|sgx)                          echo pcengine ;;
+    a26)                              echo atari2600 ;;
+    a78)                              echo atari7800 ;;
+    gdi|cdi)                          echo dreamcast ;;
+    t64|prg|crt|x64|d81|d71)          echo c64 ;;
+    adf|adz|dms|ipf|uae|lha|hdf)      echo amiga ;;
+    neo)                              echo neogeo ;;
+    # .pbp is PSX *and* PSP; .wad is Wii *and* Doom; .bin/.iso/.cue/.chd/.zip
+    # belong to everything. Folder name decides these.
+    *)                                echo "" ;;
+  esac
+}
+
+# What a human might reasonably call a folder -> what ES-DE calls the system.
+# This is how disc-based systems get sorted at all, since their file extensions
+# say nothing: a folder called "PS1" or "PlayStation" full of .bin/.cue is
+# unambiguous to a person and invisible to the extension table above.
+dir_system() {
+  local d="${1,,}"
+  d="${d//[^a-z0-9]/}"          # "Sega Mega-Drive" and "sega_megadrive" alike
+  case "$d" in
+    nes|nintendo|famicom|nintendoentertainmentsystem)          echo nes ;;
+    snes|supernintendo|supernes|supsuperfamicom|superfamicom)  echo snes ;;
+    megadrive|segamegadrive|genesis|segagenesis|md)            echo megadrive ;;
+    sega32x|32x)                                               echo sega32x ;;
+    megacd|segacd|megacdcd)                                    echo segacd ;;
+    mastersystem|segamastersystem|sms)                         echo mastersystem ;;
+    gamegear|segagamegear|gg)                                  echo gamegear ;;
+    gameboy|gb)                                                echo gb ;;
+    gameboycolor|gbc)                                          echo gbc ;;
+    gameboyadvance|gba)                                        echo gba ;;
+    n64|nintendo64)                                            echo n64 ;;
+    nds|nintendods|ds)                                         echo nds ;;
+    gamecube|gc|ngc)                                           echo gc ;;
+    wii|nintendowii)                                           echo wii ;;
+    wiiu|nintendowiiu)                                         echo wiiu ;;
+    switch|nintendoswitch)                                     echo switch ;;
+    psx|ps1|playstation|playstation1|sonyplaystation)          echo psx ;;
+    ps2|playstation2)                                          echo ps2 ;;
+    psp|playstationportable)                                   echo psp ;;
+    saturn|segasaturn)                                         echo saturn ;;
+    dreamcast|segadreamcast|dc)                                echo dreamcast ;;
+    neogeo|snkneogeo)                                          echo neogeo ;;
+    arcade|mame|fba|fbneo)                                     echo arcade ;;
+    atari2600|vcs)                                             echo atari2600 ;;
+    atari7800)                                                 echo atari7800 ;;
+    pcengine|turbografx|turbografx16|tg16)                     echo pcengine ;;
+    c64|commodore64|commodore)                                 echo c64 ;;
+    amiga|commodoreamiga)                                      echo amiga ;;
+    3do|panasonic3do)                                          echo 3do ;;
+    # A folder already named the ES-DE way passes straight through.
+    *)                                                         echo "" ;;
+  esac
+}
+
+# ── same filesystem? ───────────────────────────────────────────────────────
+# A hardlink cannot cross filesystems. If the ROMs are on a different disk
+# from the ES-DE tree this whole approach silently becomes a copy, so check
+# it up front and say so rather than filling the SSD.
+mkdir -p "$DST"
+if [[ "$(stat -c %d "$SRC")" != "$(stat -c %d "$DST")" ]]; then
+  printf '%s!%s %s and %s are on different filesystems.\n' "$YEL" "$OFF" "$SRC" "$DST"
+  printf '  Hardlinks cannot cross that boundary, so this would have to copy and\n'
+  printf '  use the space twice. Move the ROMs onto the same disk as %s first.\n' "$DST"
+  exit 1
+fi
+
+# ── walk ───────────────────────────────────────────────────────────────────
+declare -i linked=0 skipped=0 unresolved=0
+declare -a UNRESOLVED=()
+declare -A SEEN=()
+
+printf '%s==>%s %s  ->  %s%s\n' "$BOLD" "$OFF" "$SRC" "$DST" \
+  "$([[ $APPLY -eq 1 ]] || echo "   ${DIM}(dry run)${OFF}")"
+
+while IFS= read -r -d '' file; do
+  rel="${file#"$SRC"/}"
+  base="${rel##*/}"
+  ext="${base##*.}"
+  [[ "$ext" == "$base" ]] && ext=""          # no extension at all
+
+  # Ignore the debris every download folder collects. These are not games and
+  # linking them makes ES-DE show entries that launch nothing.
+  case "${base,,}" in
+    *.txt|*.nfo|*.jpg|*.jpeg|*.png|*.sfv|*.md5|*.par2|*.url|.ds_store|thumbs.db) continue ;;
+    *.part|*.!qb|*.tmp) continue ;;           # still downloading
+  esac
+
+  ext_sys=$(ext_system "$ext")
+
+  # Walk the directories between the source root and the file, deepest first,
+  # looking for one named after a system. That answers two questions at once:
+  # which system this is, when the extension could not say, and where the
+  # per-game subfolder starts.
+  #
+  # The second half matters more than it looks. A .cue is nothing without the
+  # .bin beside it and a multi-disc game is nothing without its .m3u, so
+  # anything below a system folder keeps its own directory —
+  # PS1/Final Fantasy VII/ -> psx/Final Fantasy VII/. But the system folder
+  # itself must NOT be carried over: "Super Nintendo" and "misc" are how the
+  # download was organised, not part of the game, and re-creating them under
+  # snes/ hides every game one level deeper than ES-DE looks.
+  dir_sys=""; below=""
+  d="${rel%/*}"
+  [[ "$d" == "$rel" ]] && d=""
+  while [[ -n "$d" ]]; do
+    dir_sys=$(dir_system "${d##*/}")
+    [[ -n "$dir_sys" ]] && break
+    below="${d##*/}${below:+/$below}"
+    [[ "$d" == */* ]] || { d=""; break; }
+    d="${d%/*}"
+  done
+  # No directory named a system, so the layout carries no meaning: flatten.
+  [[ -z "$dir_sys" ]] && below=""
+
+  system="${ext_sys:-$dir_sys}"
+
+  if [[ -z "$system" ]]; then
+    UNRESOLVED+=("$rel"); unresolved+=1; continue
+  fi
+
+  target="$DST/$system/${below:+$below/}$base"
+
+  if [[ -e "$target" ]]; then
+    # Already the same inode: nothing to do. A *different* file with the same
+    # name is left alone and reported, never overwritten.
+    if [[ "$(stat -c %i "$target")" == "$(stat -c %i "$file")" ]]; then
+      skipped+=1
+    else
+      printf '  %s!%s %s exists and is a different file — left alone\n' "$YEL" "$OFF" "$system/$base"
+      skipped+=1
+    fi
+    continue
+  fi
+
+  [[ -z "${SEEN[$system]:-}" ]] && { SEEN[$system]=1; }
+  linked+=1
+  if [[ $APPLY -eq 1 ]]; then
+    mkdir -p "${target%/*}"
+    ln "$file" "$target"
+  fi
+  printf '  %s+%s %-12s %s\n' "$GRN" "$OFF" "$system" "$rel"
+done < <(find "$SRC" -type f -print0)
+
+# ── report ─────────────────────────────────────────────────────────────────
+echo
+printf '%s%d%s linked  %s%d%s already present  %s%d%s unresolved\n' \
+  "$BOLD" "$linked" "$OFF" "$BOLD" "$skipped" "$OFF" "$BOLD" "$unresolved" "$OFF"
+
+if (( unresolved > 0 )); then
+  echo
+  printf '%sUnresolved%s — extension is shared by too many systems to guess, and no\n' "$BOLD" "$OFF"
+  printf 'parent folder named a system. Put these in a folder named after the system\n'
+  printf '(e.g. "PS1", "Sega Saturn", "Dreamcast") and re-run:\n\n'
+  printf '  %s\n' "${UNRESOLVED[@]:0:25}"
+  (( unresolved > 25 )) && printf '  ... and %d more\n' "$(( unresolved - 25 ))"
+fi
+
+if (( linked > 0 )); then
+  echo
+  if [[ $APPLY -eq 1 ]]; then
+    printf 'ES-DE reads its game list at startup, so restart it to see these:\n'
+    printf '  cd ~/stack && docker compose restart es-de\n'
+  else
+    printf 'Nothing was changed. Re-run with %s--apply%s to create these links.\n' "$BOLD" "$OFF"
+  fi
+fi

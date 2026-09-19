@@ -195,8 +195,10 @@ step "Data directories (§7 step 3)"
 sudo mkdir -p /srv/appdata/media/{gluetun,qbittorrent,prowlarr,radarr,sonarr,bazarr,plex/{config,transcode}}
 sudo mkdir -p /srv/appdata/home/{homeassistant,mosquitto,zigbee2mqtt}
 sudo mkdir -p /srv/appdata/apps/{jellyseerr,kometa,matte-vm}
+sudo mkdir -p /srv/appdata/games/{es-de,retroarch}
 sudo mkdir -p /mnt/active/{incomplete,downloads/{movies,tv},library/{movies,tv}} \
               /mnt/active/{books/{audiobooks,ebooks,magazines},other} \
+              /mnt/active/games/{roms,bios} \
               /mnt/archive/{movies,tv}
 # Recursive on purpose: a container that cannot write its own state directory
 # is §13's "config persistence" symptom. On a box with a full library this
@@ -208,6 +210,13 @@ ok "tree created under /srv/appdata, /mnt/active, /mnt/archive; owned by $HOST_U
 # mount, and every torrent errors on add until it is repointed at /data (§8
 # step 3, §13). The directory existing is the precondition, not the fix.
 ok "/mnt/active/incomplete exists — still set it as qBittorrent's save path (§8 step 3)"
+
+# ES-DE reads /mnt/active/games/roms and nothing else, and it will not go
+# looking: a system needs its own directory, named the way ES-DE names it, or
+# the frontend comes up empty with no error at all (§16).
+if [[ -z "$(ls -A /mnt/active/games/roms 2>/dev/null)" ]]; then
+  ok "/mnt/active/games/roms is empty — run bin/roms-import once there are ROMs to sort (§16)"
+fi
 
 # ── 7. checkout location ───────────────────────────────────────────────────
 step "Checkout location (§7 step 1)"

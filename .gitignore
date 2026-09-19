@@ -2,3 +2,4 @@
 # outside the Pi, but never here.
 .env
 *.bak
+.DS_Store

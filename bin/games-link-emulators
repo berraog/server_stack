@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Teach ES-DE how to reach the emulators in the other container.
+#
+# ES-DE launches a game by running `retroarch` and expects to find it on its
+# own PATH. Here RetroArch is a different container, so what goes on ES-DE's
+# PATH is RetroStack's shim: a small script that writes the command line into
+# the FIFO both containers share, waits, and hands back the exit code. The
+# game then runs in the retroarch container, drawing on ES-DE's X display.
+#
+# This is the one step that is not declarative. Nothing in compose can put a
+# file inside another image, so it is done here and must be **re-run whenever
+# the es-de container is recreated** — a `pull`, an image change or a
+# `docker compose up -d --force-recreate` all reset the container filesystem.
+# Re-running it at any other time is harmless.
+#
+#   bin/games-link-emulators
+#
+# Symptom that you forgot: every game in ES-DE fails instantly with
+# "emulator not found" or flashes back to the menu with no message.
+set -euo pipefail
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; OFF=$'\033[0m'
+else
+  BOLD=; RED=; YEL=; GRN=; OFF=
+fi
+ok()   { printf '    %s✓%s %s\n' "$GRN" "$OFF" "$*"; }
+warn() { printf '    %s!%s %s\n' "$YEL" "$OFF" "$*"; }
+die()  { printf '\n%sxx %s%s\n\n' "$RED" "$*" "$OFF" >&2; exit 1; }
+step() { printf '\n%s==> %s%s\n' "$BOLD" "$*" "$OFF"; }
+
+FRONTEND=es-de
+
+running() { [[ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" == "true" ]]; }
+
+step "Containers"
+running "$FRONTEND" || die "$FRONTEND is not running — cd ~/stack && docker compose up -d"
+ok "$FRONTEND"
+
+# Every emulator container that might be running, and the command name ES-DE
+# uses for it. Add a line here if you enable more of RetroStack's profiles.
+#   <container>   <name ES-DE invokes>
+EMULATORS=(
+  "retroarch    retroarch"
+  "ppsspp       PPSSPPSDL"
+  "dolphin-emu  dolphin-emu"
+)
+
+linked=0
+for entry in "${EMULATORS[@]}"; do
+  read -r container command_name <<<"$entry"
+  running "$container" || { warn "$container not running — skipped"; continue; }
+
+  # Ask the container where its shim is rather than assuming a path, so this
+  # keeps working if RetroStack moves it.
+  shim=$(docker exec "$container" sh -c 'command -v retrostack-emulator-launch' 2>/dev/null || true)
+  [[ -n "$shim" ]] || die "no retrostack-emulator-launch inside $container — wrong image? expected blackoutsecure/retrostack:*"
+
+  tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+  docker cp -q "$container:$shim" "$tmp" 2>/dev/null || docker cp "$container:$shim" "$tmp"
+  docker cp "$tmp" "$FRONTEND:/usr/local/bin/$command_name"
+  docker exec "$FRONTEND" chmod 0755 "/usr/local/bin/$command_name"
+  rm -f "$tmp"
+
+  ok "$command_name -> $container"
+  linked+=1
+done
+
+(( linked > 0 )) || die "nothing linked — no emulator container is running"
+
+step "Verify"
+# ES-DE resolves emulators through PATH, so this is the same lookup it does.
+for entry in "${EMULATORS[@]}"; do
+  read -r container command_name <<<"$entry"
+  running "$container" || continue
+  if docker exec "$FRONTEND" sh -c "command -v $command_name" >/dev/null 2>&1; then
+    ok "$FRONTEND can find $command_name"
+  else
+    warn "$FRONTEND still cannot find $command_name on its PATH"
+  fi
+done
+
+# The FIFOs are what the shim actually writes to. If the shared volume did not
+# mount, the links above exist and still every launch hangs — so check it.
+if docker exec "$FRONTEND" test -d /run/retrostack-emulators 2>/dev/null; then
+  ok "control pipe directory is mounted in $FRONTEND"
+else
+  warn "/run/retrostack-emulators missing in $FRONTEND — the emulator-control volume did not mount,"
+  warn "  which usually means the tmpfs on /run shadowed it. Games will hang on launch (§16)."
+fi
+
+printf '\nDone. Launch a game to confirm; if it fails, %sdocker compose logs retroarch%s.\n' "$BOLD" "$OFF"
