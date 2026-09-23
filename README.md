@@ -408,7 +408,7 @@ allocated" surprise when adding an app.
 | 5055 | Jellyseerr | its own default |
 | 1883 | Mosquitto (MQTT) | published so host-networked HA can reach it |
 | 9001 | Mosquitto (websockets) | |
-| 8082 | Zigbee2MQTT frontend | deCONZ wants the same port — see [home/README.md](home/README.md) |
+| 8082 | Zigbee2MQTT frontend | container side is **8080**; deCONZ wants this host port too — see [home/README.md](home/README.md) |
 | 8123 | Home Assistant | `network_mode: host`, so no `ports:` entry |
 | 32400 | Plex | `network_mode: host` |
 | — | ES-DE, RetroArch | no port by design: the output is HDMI ([games/README.md](games/README.md)) |

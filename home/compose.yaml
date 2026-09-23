@@ -66,7 +66,18 @@ services:
     devices:
       - /dev/serial/by-id/usb-dresden_elektronik_ingenieurtechnik_GmbH_ConBee_II_DE2656890-if00:/dev/ttyACM0
     ports:
-      - "8082:8082"   # Zigbee2MQTT frontend
+      # Host 8082 -> container 8080, and the two deliberately differ.
+      #
+      # Zigbee2MQTT serves its frontend on 8080 by default, and its onboarding
+      # server (shown when /app/data/configuration.yaml does not exist yet)
+      # always uses 8080 regardless of what a config would have said. Host 8080
+      # is already qBittorrent's, published by gluetun (README §4), so the
+      # remap happens on the host side and the container keeps its default.
+      #
+      # Setting frontend.port in configuration.yaml to make both sides 8082
+      # also works, but then onboarding is unreachable on any fresh data
+      # directory — which is exactly the failure this comment exists to prevent.
+      - "8082:8080"   # Zigbee2MQTT frontend
     restart: unless-stopped
 
   # deCONZ is the alternative to zigbee2mqtt for the same ConBee II, and the two
