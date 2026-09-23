@@ -86,7 +86,7 @@ if docker exec "$FRONTEND" test -d /run/retrostack-emulators 2>/dev/null; then
   ok "control pipe directory is mounted in $FRONTEND"
 else
   warn "/run/retrostack-emulators missing in $FRONTEND — the emulator-control volume did not mount,"
-  warn "  which usually means the tmpfs on /run shadowed it. Games will hang on launch (§16)."
+  warn "  which usually means the tmpfs on /run shadowed it. Games will hang on launch (games/README.md)."
 fi
 
 printf '\nDone. Launch a game to confirm; if it fails, %sdocker compose logs retroarch%s.\n' "$BOLD" "$OFF"

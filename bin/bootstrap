@@ -193,7 +193,7 @@ fi
 # ── 6. directory tree ──────────────────────────────────────────────────────
 step "Data directories (§7 step 3)"
 sudo mkdir -p /srv/appdata/media/{gluetun,qbittorrent,prowlarr,radarr,sonarr,bazarr,plex/{config,transcode}}
-sudo mkdir -p /srv/appdata/home/{homeassistant,mosquitto,zigbee2mqtt}
+sudo mkdir -p /srv/appdata/home/{homeassistant,mosquitto/{config,data},zigbee2mqtt}
 sudo mkdir -p /srv/appdata/apps/{jellyseerr,kometa,matte-vm}
 sudo mkdir -p /srv/appdata/games/{es-de,retroarch}
 sudo mkdir -p /mnt/active/{incomplete,downloads/{movies,tv},library/{movies,tv}} \
@@ -204,7 +204,16 @@ sudo mkdir -p /mnt/active/{incomplete,downloads/{movies,tv},library/{movies,tv}}
 # is §13's "config persistence" symptom. On a box with a full library this
 # walks every file and takes minutes — it changes nothing already correct.
 sudo chown -R "$HOST_UID:$HOST_GID" /srv/appdata /mnt/active /mnt/archive
-ok "tree created under /srv/appdata, /mnt/active, /mnt/archive; owned by $HOST_UID:$HOST_GID"
+# The one directory that must NOT be 1000:1000. eclipse-mosquitto runs as uid
+# 1883 and silently fails to write its persistence database and log under any
+# other owner — a broker that starts, accepts clients, and loses every retained
+# message on restart. home/README.md has the config file that goes with this.
+sudo chown -R 1883:1883 /srv/appdata/home/mosquitto
+ok "tree created under /srv/appdata, /mnt/active, /mnt/archive; owned by $HOST_UID:$HOST_GID (mosquitto 1883)"
+
+if [[ ! -f /srv/appdata/home/mosquitto/config/mosquitto.conf ]]; then
+  warn "mosquitto has no config/mosquitto.conf — 2.x refuses every connection until it does (home/README.md)"
+fi
 
 # qBittorrent's own default save path is /downloads, which this stack does not
 # mount, and every torrent errors on add until it is repointed at /data (§8
@@ -213,9 +222,9 @@ ok "/mnt/active/incomplete exists — still set it as qBittorrent's save path (�
 
 # ES-DE reads /mnt/active/games/roms and nothing else, and it will not go
 # looking: a system needs its own directory, named the way ES-DE names it, or
-# the frontend comes up empty with no error at all (§16).
+# the frontend comes up empty with no error at all (games/README.md).
 if [[ -z "$(ls -A /mnt/active/games/roms 2>/dev/null)" ]]; then
-  ok "/mnt/active/games/roms is empty — run bin/roms-import once there are ROMs to sort (§16)"
+  ok "/mnt/active/games/roms is empty — run bin/roms-import once there are ROMs to sort (games/README.md)"
 fi
 
 # ── 7. checkout location ───────────────────────────────────────────────────

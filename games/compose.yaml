@@ -9,7 +9,7 @@
 #
 # This stack is unlike every other fragment here in that it owns the physical
 # console. There is no port, no hostname and no web UI — the output is the
-# HDMI socket and the input is a Bluetooth pad (README §16).
+# HDMI socket and the input is a Bluetooth pad (games/README.md).
 #
 # Three consequences of that, which explain most of what looks odd below:
 #
@@ -24,7 +24,7 @@
 #    difference between a working setup and a black screen.
 # 3. **Bluetooth pairing happens on the host, not here.** BlueZ owns the
 #    adapter; once a pad is paired it appears as /dev/input/event*, and that
-#    is what gets passed through. README §16 has the bluetoothctl recipe.
+#    is what gets passed through. games/README.md has the bluetoothctl recipe.
 #
 # `privileged: true` is the vendor's requirement, not a shortcut taken here —
 # driving KMS, VTs and evdev from a container needs it. This is the only
@@ -54,7 +54,7 @@ services:
       # lose, since scraping a large library takes hours. Internal SSD.
       - /srv/appdata/games/es-de:/config
       # Read-only on purpose: ES-DE never writes here, and the importer is the
-      # only thing that should touch this tree (bin/roms-import, README §16).
+      # only thing that should touch this tree (bin/roms-import, games/README.md).
       - /mnt/active/games/roms:/roms:ro
       - /mnt/active/games/bios:/bios:ro
       - x11-socket:/tmp/.X11-unix               # rw — this container IS the X server

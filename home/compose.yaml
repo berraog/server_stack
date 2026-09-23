@@ -47,7 +47,8 @@ services:
       #
       # mosquitto 2.x listens on localhost only and refuses anonymous clients
       # until told otherwise, so config/mosquitto.conf inside it is required,
-      # not optional. Carry the existing one over — README §15d.
+      # not optional — home/README.md has the file to write, and the uid 1883
+      # ownership it needs.
       - /srv/appdata/home/mosquitto:/mosquitto
     ports:
       - "1883:1883"   # MQTT — published so host-networked HA can reach it
